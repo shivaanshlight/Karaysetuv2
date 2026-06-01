@@ -76,7 +76,7 @@ async function findMemberByName(name, orgId) {
 }
 
 // ─────────────────────────────────────────
-// FIND TASK BY REFERENCE — used by complete/delete
+// FIND TASK BY REFERENCE — used by complete/delete/update/reassign/transfer
 // ─────────────────────────────────────────
 async function findTaskByReference(orgId, reference) {
   const words = reference
@@ -238,12 +238,15 @@ async function handleMessage(incomingMessage, senderNumber) {
       break;
 
     case "update_task":
+      await handleUpdateTask(senderNumber, member, ai);
+      break;
+
     case "reassign_task":
+      await handleReassignTask(senderNumber, member, ai);
+      break;
+
     case "transfer_ownership":
-      await sendMessage(
-        senderNumber,
-        "That feature isn't available yet. For now you can create, list, complete, and delete tasks. Send *help* for the full list.",
-      );
+      await handleTransferOwnership(senderNumber, member, ai);
       break;
 
     default:
@@ -265,7 +268,10 @@ async function handleHelp(senderNumber, member) {
   helpText += `• overdue tasks\n`;
   helpText += `• add task [description]\n`;
   helpText += `• complete [task name or ID]\n`;
-  helpText += `• delete [task ID]\n\n`;
+  helpText += `• delete [task ID]\n`;
+  helpText += `• change due date of [task] to [date]\n`;
+  helpText += `• reassign [task] to [name]\n`;
+  helpText += `• transfer [task] to [name]\n\n`;
 
   if (member.role === "organizer") {
     helpText += `*Organizer only:*\n`;
@@ -393,6 +399,12 @@ async function handleConfirmation(senderNumber, member, message) {
     await executeCompleteTask(senderNumber, member, action);
   } else if (action.action_type === "remove_member") {
     await executeRemoveMember(senderNumber, member, action);
+  } else if (action.action_type === "update_task") {
+    await executeUpdateTask(senderNumber, member, action);
+  } else if (action.action_type === "reassign_task") {
+    await executeReassignTask(senderNumber, member, action);
+  } else if (action.action_type === "transfer_ownership") {
+    await executeTransferOwnership(senderNumber, member, action);
   }
 
   return true;
@@ -674,7 +686,6 @@ async function handleAddMember(senderNumber, member, ai) {
       return;
     }
 
-    // Check if this number already exists in the org (any status)
     const existing = await pool.query(
       `SELECT * FROM members WHERE org_id = $1 AND whatsapp_number = $2`,
       [member.org_id, formattedNumber],
@@ -688,14 +699,12 @@ async function handleAddMember(senderNumber, member, ai) {
         );
         return;
       }
-      // Previously removed → reactivate instead of creating a duplicate
       await pool.query(
         `UPDATE members SET status = 'active', name = $1, role = 'member', updated_at = NOW()
          WHERE member_id = $2`,
         [ai.member_name, existing.rows[0].member_id],
       );
     } else {
-      // Brand-new member
       await pool.query(
         `INSERT INTO members (org_id, name, whatsapp_number, role)
          VALUES ($1, $2, $3, 'member')`,
@@ -1057,6 +1066,355 @@ async function handleTasksAssignedTo(senderNumber, member, ai) {
       response += `${task.task_id} | ${task.title} | Due: ${due}\n`;
     }
     await sendMessage(senderNumber, response);
+  } catch (error) {
+    console.log("Error:", error.message);
+    await sendMessage(senderNumber, "Something went wrong. Please try again.");
+  }
+}
+
+// ─────────────────────────────────────────
+// UPDATE TASK — change due date / priority
+// ─────────────────────────────────────────
+async function handleUpdateTask(senderNumber, member, ai) {
+  try {
+    if (!ai.task_reference) {
+      await sendMessage(
+        senderNumber,
+        "Which task do you want to update? Example: change due date of KS-019 to Monday",
+      );
+      return;
+    }
+
+    const task = await findTaskByReference(member.org_id, ai.task_reference);
+    if (!task) {
+      await sendMessage(senderNumber, `I couldn't find that task.`);
+      return;
+    }
+
+    if (task.owner_id !== member.member_id && member.role !== "organizer") {
+      await sendMessage(
+        senderNumber,
+        "Only the task owner or an Organizer can update a task.",
+      );
+      return;
+    }
+
+    const newDue = ai.due_date || null;
+    const newPriority = ["high", "normal", "low"].includes(ai.priority)
+      ? ai.priority
+      : null;
+
+    if (!newDue && !newPriority) {
+      await sendMessage(
+        senderNumber,
+        `What should I change on ${task.task_id}? You can update the due date or priority.\nExample: change due date of ${task.task_id} to Monday`,
+      );
+      return;
+    }
+
+    const changes = [];
+    if (newDue) changes.push(`due date → ${new Date(newDue).toDateString()}`);
+    if (newPriority) changes.push(`priority → ${newPriority}`);
+
+    await sendMessage(
+      senderNumber,
+      `Update ${task.task_id} (${task.title}): ${changes.join(", ")}. Confirm? (yes/no)`,
+    );
+
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO pending_actions
+       (org_id, member_id, action_type, action_data, expires_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        member.org_id,
+        member.member_id,
+        "update_task",
+        JSON.stringify({
+          task_id: task.task_id,
+          task_title: task.title,
+          new_due_date: newDue,
+          new_priority: newPriority,
+        }),
+        expiresAt,
+      ],
+    );
+  } catch (error) {
+    console.log("Error:", error.message);
+    await sendMessage(senderNumber, "Something went wrong. Please try again.");
+  }
+}
+
+async function executeUpdateTask(senderNumber, member, action) {
+  try {
+    const data = action.action_data;
+
+    if (data.new_due_date) {
+      await pool.query(
+        `UPDATE tasks SET due_date = $1, updated_at = NOW() WHERE task_id = $2`,
+        [data.new_due_date, data.task_id],
+      );
+    }
+    if (data.new_priority) {
+      await pool.query(
+        `UPDATE tasks SET priority = $1, updated_at = NOW() WHERE task_id = $2`,
+        [data.new_priority, data.task_id],
+      );
+    }
+
+    await pool.query(
+      `UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`,
+      [action.action_id],
+    );
+
+    const parts = [];
+    if (data.new_due_date)
+      parts.push(`due date is now ${new Date(data.new_due_date).toDateString()}`);
+    if (data.new_priority) parts.push(`priority is now ${data.new_priority}`);
+
+    await sendMessage(
+      senderNumber,
+      `Updated ✅ ${data.task_id} — ${parts.join(", ")}.`,
+    );
+  } catch (error) {
+    console.log("Error:", error.message);
+    await sendMessage(senderNumber, "Something went wrong. Please try again.");
+  }
+}
+
+// ─────────────────────────────────────────
+// REASSIGN TASK — change who it's assigned to
+// ─────────────────────────────────────────
+async function handleReassignTask(senderNumber, member, ai) {
+  try {
+    if (!ai.task_reference) {
+      await sendMessage(
+        senderNumber,
+        "Which task do you want to reassign? Example: reassign KS-019 to Amit",
+      );
+      return;
+    }
+    const newName = ai.assignee_name || ai.member_name;
+    if (!newName) {
+      await sendMessage(
+        senderNumber,
+        "Who should I reassign it to? Example: reassign KS-019 to Amit",
+      );
+      return;
+    }
+
+    const task = await findTaskByReference(member.org_id, ai.task_reference);
+    if (!task) {
+      await sendMessage(senderNumber, `I couldn't find that task.`);
+      return;
+    }
+
+    if (task.owner_id !== member.member_id && member.role !== "organizer") {
+      await sendMessage(
+        senderNumber,
+        "Only the task owner or an Organizer can reassign a task.",
+      );
+      return;
+    }
+
+    const matches = await findMemberByName(newName, member.org_id);
+    if (matches.length === 0) {
+      await sendMessage(
+        senderNumber,
+        `${newName} is not a member of ${member.org_name}.`,
+      );
+      return;
+    }
+    if (matches.length > 1) {
+      let msg = `Multiple members named ${newName}. Which one?\n\n`;
+      matches.forEach((m, i) => {
+        msg += `${i + 1}) ${m.name} — ${m.whatsapp_number}\n`;
+      });
+      await sendMessage(senderNumber, msg);
+      return;
+    }
+
+    const newAssignee = matches[0];
+    await sendMessage(
+      senderNumber,
+      `Reassign ${task.task_id} (${task.title}) to ${newAssignee.name}? (yes/no)`,
+    );
+
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO pending_actions
+       (org_id, member_id, action_type, action_data, expires_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        member.org_id,
+        member.member_id,
+        "reassign_task",
+        JSON.stringify({
+          task_id: task.task_id,
+          task_title: task.title,
+          new_assignee_id: newAssignee.member_id,
+          new_assignee_name: newAssignee.name,
+          new_assignee_number: newAssignee.whatsapp_number,
+          old_assignee_id: task.assignee_id,
+          old_assignee_number: task.assignee_number,
+        }),
+        expiresAt,
+      ],
+    );
+  } catch (error) {
+    console.log("Error:", error.message);
+    await sendMessage(senderNumber, "Something went wrong. Please try again.");
+  }
+}
+
+async function executeReassignTask(senderNumber, member, action) {
+  try {
+    const data = action.action_data;
+
+    await pool.query(
+      `UPDATE tasks SET assignee_id = $1, updated_at = NOW() WHERE task_id = $2`,
+      [data.new_assignee_id, data.task_id],
+    );
+    await pool.query(
+      `UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`,
+      [action.action_id],
+    );
+
+    await sendMessage(
+      senderNumber,
+      `Done ✅ ${data.task_id} reassigned to ${data.new_assignee_name}.`,
+    );
+
+    if (data.new_assignee_number) {
+      await sendMessage(
+        data.new_assignee_number,
+        `📋 New task assigned by ${member.name}:\n${data.task_id} — ${data.task_title}`,
+      );
+    }
+
+    if (
+      data.old_assignee_id &&
+      data.old_assignee_id !== data.new_assignee_id &&
+      data.old_assignee_number
+    ) {
+      await sendMessage(
+        data.old_assignee_number,
+        `${data.task_id} — ${data.task_title} has been reassigned to ${data.new_assignee_name}.`,
+      );
+    }
+  } catch (error) {
+    console.log("Error:", error.message);
+    await sendMessage(senderNumber, "Something went wrong. Please try again.");
+  }
+}
+
+// ─────────────────────────────────────────
+// TRANSFER OWNERSHIP
+// ─────────────────────────────────────────
+async function handleTransferOwnership(senderNumber, member, ai) {
+  try {
+    if (!ai.task_reference) {
+      await sendMessage(
+        senderNumber,
+        "Which task's ownership do you want to transfer? Example: transfer KS-020 to Priya",
+      );
+      return;
+    }
+    const newName = ai.assignee_name || ai.member_name;
+    if (!newName) {
+      await sendMessage(
+        senderNumber,
+        "Who should become the owner? Example: transfer KS-020 to Priya",
+      );
+      return;
+    }
+
+    const task = await findTaskByReference(member.org_id, ai.task_reference);
+    if (!task) {
+      await sendMessage(senderNumber, `I couldn't find that task.`);
+      return;
+    }
+
+    if (task.owner_id !== member.member_id && member.role !== "organizer") {
+      await sendMessage(
+        senderNumber,
+        "Only the current owner or an Organizer can transfer ownership.",
+      );
+      return;
+    }
+
+    const matches = await findMemberByName(newName, member.org_id);
+    if (matches.length === 0) {
+      await sendMessage(
+        senderNumber,
+        `${newName} is not a member of ${member.org_name}.`,
+      );
+      return;
+    }
+    if (matches.length > 1) {
+      let msg = `Multiple members named ${newName}. Which one?\n\n`;
+      matches.forEach((m, i) => {
+        msg += `${i + 1}) ${m.name} — ${m.whatsapp_number}\n`;
+      });
+      await sendMessage(senderNumber, msg);
+      return;
+    }
+
+    const newOwner = matches[0];
+    await sendMessage(
+      senderNumber,
+      `Transfer ownership of ${task.task_id} (${task.title}) to ${newOwner.name}? You will no longer be the owner. (yes/no)`,
+    );
+
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO pending_actions
+       (org_id, member_id, action_type, action_data, expires_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        member.org_id,
+        member.member_id,
+        "transfer_ownership",
+        JSON.stringify({
+          task_id: task.task_id,
+          task_title: task.title,
+          new_owner_id: newOwner.member_id,
+          new_owner_name: newOwner.name,
+          new_owner_number: newOwner.whatsapp_number,
+        }),
+        expiresAt,
+      ],
+    );
+  } catch (error) {
+    console.log("Error:", error.message);
+    await sendMessage(senderNumber, "Something went wrong. Please try again.");
+  }
+}
+
+async function executeTransferOwnership(senderNumber, member, action) {
+  try {
+    const data = action.action_data;
+
+    await pool.query(
+      `UPDATE tasks SET owner_id = $1, updated_at = NOW() WHERE task_id = $2`,
+      [data.new_owner_id, data.task_id],
+    );
+    await pool.query(
+      `UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`,
+      [action.action_id],
+    );
+
+    await sendMessage(
+      senderNumber,
+      `Done ✅ ${data.new_owner_name} is now the owner of ${data.task_id}.`,
+    );
+
+    if (data.new_owner_number) {
+      await sendMessage(
+        data.new_owner_number,
+        `📋 ${member.name} has transferred ownership of ${data.task_id} — ${data.task_title} to you.`,
+      );
+    }
   } catch (error) {
     console.log("Error:", error.message);
     await sendMessage(senderNumber, "Something went wrong. Please try again.");
