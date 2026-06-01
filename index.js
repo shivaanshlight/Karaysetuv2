@@ -4,6 +4,7 @@ const cors = require("cors");
 const twilio = require("twilio");
 const apiRoutes = require("./api");
 const { handleMessage, handleConfirmation, findMember } = require("./bot");
+const { startReminders } = require("./reminders");
 
 const app = express();
 app.set("trust proxy", true);
@@ -63,4 +64,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("KaryaSetu server running on port " + PORT);
   console.log("Waiting for WhatsApp messages...");
+  startReminders();
 });
