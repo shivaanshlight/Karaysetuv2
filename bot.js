@@ -141,6 +141,31 @@ async function handleMessage(incomingMessage, senderNumber) {
 
   console.log("Member:", member.name, "| Role:", member.role);
 
+  // ── Reminder opt-out / opt-in (handled before the AI) ──
+  const lower = message.toLowerCase();
+  if (lower.includes("reminder") && /\b(stop|off|disable|no)\b/.test(lower)) {
+    await pool.query(
+      `UPDATE members SET reminders_enabled = false, updated_at = NOW() WHERE member_id = $1`,
+      [member.member_id],
+    );
+    await sendMessage(
+      senderNumber,
+      "Okay, I won't send you due-date reminders anymore. Send 'start reminders' to turn them back on.",
+    );
+    return;
+  }
+  if (lower.includes("reminder") && /\b(start|on|enable)\b/.test(lower)) {
+    await pool.query(
+      `UPDATE members SET reminders_enabled = true, updated_at = NOW() WHERE member_id = $1`,
+      [member.member_id],
+    );
+    await sendMessage(
+      senderNumber,
+      "Done — I'll send you due-date reminders again.",
+    );
+    return;
+  }
+
   const orgMembers = await getOrgMembers(member.org_id);
   const today = todayInTimezone(member.timezone);
 
@@ -271,7 +296,8 @@ async function handleHelp(senderNumber, member) {
   helpText += `• delete [task ID]\n`;
   helpText += `• change due date of [task] to [date]\n`;
   helpText += `• reassign [task] to [name]\n`;
-  helpText += `• transfer [task] to [name]\n\n`;
+  helpText += `• transfer [task] to [name]\n`;
+  helpText += `• stop reminders / start reminders\n\n`;
 
   if (member.role === "organizer") {
     helpText += `*Organizer only:*\n`;
