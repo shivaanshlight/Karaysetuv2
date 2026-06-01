@@ -63,7 +63,6 @@ async function getOrgMembers(orgId) {
 
 // ─────────────────────────────────────────
 // FIND MEMBER BY NAME — for assignee resolution
-// PRD Reference: Section 6.2
 // ─────────────────────────────────────────
 async function findMemberByName(name, orgId) {
   const result = await pool.query(
@@ -78,10 +77,6 @@ async function findMemberByName(name, orgId) {
 
 // ─────────────────────────────────────────
 // FIND TASK BY REFERENCE — used by complete/delete
-// Matches on task ID, full title, or individual keywords.
-// Results are deterministically ordered: exact ID first, then exact title,
-// then most recent — so we never silently act on a random match.
-// Joins both owner and assignee so callers can notify either side.
 // ─────────────────────────────────────────
 async function findTaskByReference(orgId, reference) {
   const words = reference
@@ -134,7 +129,6 @@ async function handleMessage(incomingMessage, senderNumber) {
 
   const message = incomingMessage.trim();
 
-  // Step 1 — Check if registered
   const member = await findMember(senderNumber);
 
   if (!member) {
@@ -147,23 +141,18 @@ async function handleMessage(incomingMessage, senderNumber) {
 
   console.log("Member:", member.name, "| Role:", member.role);
 
-  // Step 2 — Get org members for AI context
   const orgMembers = await getOrgMembers(member.org_id);
   const today = todayInTimezone(member.timezone);
 
-  // Step 3 — Send to AI for understanding
   const ai = await understandMessage(message, member.name, orgMembers, today);
 
   console.log("AI intent:", ai.intent, "| Confidence:", ai.confidence);
 
-  // Step 4 — If AI needs clarification
-  // PRD Reference: Section 6.1 — confidence threshold 0.80
   if (ai.clarification_needed && ai.clarification_question) {
     await sendMessage(senderNumber, ai.clarification_question);
     return;
   }
 
-  // Step 5 — Route to right function
   switch (ai.intent) {
     case "help":
       await handleHelp(senderNumber, member);
@@ -251,8 +240,6 @@ async function handleMessage(incomingMessage, senderNumber) {
     case "update_task":
     case "reassign_task":
     case "transfer_ownership":
-      // Recognised intents that aren't built yet — tell the user plainly
-      // instead of pretending we didn't understand.
       await sendMessage(
         senderNumber,
         "That feature isn't available yet. For now you can create, list, complete, and delete tasks. Send *help* for the full list.",
@@ -294,7 +281,6 @@ async function handleHelp(senderNumber, member) {
 
 // ─────────────────────────────────────────
 // CREATE TASK
-// PRD Reference: Section 6.2
 // ─────────────────────────────────────────
 async function handleCreateTask(senderNumber, member, ai) {
   try {
@@ -303,7 +289,6 @@ async function handleCreateTask(senderNumber, member, ai) {
       return;
     }
 
-    // Resolve assignee
     let assigneeId = member.member_id;
     let assigneeName = member.name;
 
@@ -316,8 +301,6 @@ async function handleCreateTask(senderNumber, member, ai) {
           `${ai.assignee_name} is not a member of ${member.org_name}. Task will be assigned to you instead.`,
         );
       } else if (matches.length > 1) {
-        // Ambiguous — two people with same name
-        // PRD Reference: Section 6.2 — disambiguation
         let msg = `Multiple members named ${ai.assignee_name}. Which one?\n\n`;
         matches.forEach((m, i) => {
           msg += `${i + 1}) ${m.name} — ${m.whatsapp_number}\n`;
@@ -330,13 +313,10 @@ async function handleCreateTask(senderNumber, member, ai) {
       }
     }
 
-    // Format due date
     const dueDisplay = ai.due_date
       ? new Date(ai.due_date).toDateString()
       : "No due date";
 
-    // Show confirmation
-    // PRD Reference: Section 6.2 — confirm before creating
     const confirmMsg =
       `Creating this task:\n\n` +
       `📋 ${ai.task_title}\n` +
@@ -347,8 +327,6 @@ async function handleCreateTask(senderNumber, member, ai) {
 
     await sendMessage(senderNumber, confirmMsg);
 
-    // Save pending action
-    // PRD Reference: Section 6.1 — 10 minute confirmation timeout
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await pool.query(
@@ -377,7 +355,6 @@ async function handleCreateTask(senderNumber, member, ai) {
 
 // ─────────────────────────────────────────
 // HANDLE YES/NO CONFIRMATIONS
-// PRD Reference: Section 6.1
 // ─────────────────────────────────────────
 async function handleConfirmation(senderNumber, member, message) {
   const confirmed = ["yes", "confirm", "1"].includes(message.toLowerCase());
@@ -385,7 +362,6 @@ async function handleConfirmation(senderNumber, member, message) {
 
   if (!confirmed && !denied) return false;
 
-  // Find pending action
   const result = await pool.query(
     `SELECT * FROM pending_actions
      WHERE member_id = $1
@@ -409,7 +385,6 @@ async function handleConfirmation(senderNumber, member, message) {
     return true;
   }
 
-  // Execute the confirmed action
   if (action.action_type === "create_task") {
     await executeCreateTask(senderNumber, member, action);
   } else if (action.action_type === "delete_task") {
@@ -431,8 +406,6 @@ async function executeCreateTask(senderNumber, member, action) {
   try {
     const data = action.action_data;
 
-    // Counter increment + insert must be atomic so a failed insert never
-    // burns a task number (no gaps in KS-xxx).
     await client.query("BEGIN");
 
     const counterResult = await client.query(
@@ -458,7 +431,6 @@ async function executeCreateTask(senderNumber, member, action) {
       ],
     );
 
-    // Mark action as confirmed
     await client.query(
       `UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`,
       [action.action_id],
@@ -466,14 +438,11 @@ async function executeCreateTask(senderNumber, member, action) {
 
     await client.query("COMMIT");
 
-    // Notify creator
     await sendMessage(
       senderNumber,
       `Done ✅ ${taskId} created.\n\n📋 ${data.title}\n👤 Assigned to: ${data.assignee_name}\n📅 Due: ${data.due_date ? new Date(data.due_date).toDateString() : "No due date"}`,
     );
 
-    // Notify assignee if different from creator
-    // PRD Reference: Section 9.1
     if (data.assignee_id !== member.member_id) {
       const assigneeResult = await pool.query(
         `SELECT whatsapp_number FROM members WHERE member_id = $1`,
@@ -497,7 +466,6 @@ async function executeCreateTask(senderNumber, member, action) {
 
 // ─────────────────────────────────────────
 // COMPLETE TASK
-// PRD Reference: Section 6.5
 // ─────────────────────────────────────────
 async function handleCompleteTask(senderNumber, member, ai) {
   try {
@@ -509,7 +477,6 @@ async function handleCompleteTask(senderNumber, member, ai) {
       return;
     }
 
-    // Find the task
     const task = await findTaskByReference(member.org_id, ai.task_reference);
 
     if (!task) {
@@ -520,7 +487,6 @@ async function handleCompleteTask(senderNumber, member, ai) {
       return;
     }
 
-    // Only the assignee, owner, or an organizer can complete a task.
     if (
       task.assignee_id !== member.member_id &&
       task.owner_id !== member.member_id &&
@@ -533,13 +499,11 @@ async function handleCompleteTask(senderNumber, member, ai) {
       return;
     }
 
-    // Ask confirmation
     await sendMessage(
       senderNumber,
       `Mark ${task.task_id} (${task.title}) as complete? (yes/no)`,
     );
 
-    // Save pending action
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     await pool.query(
       `INSERT INTO pending_actions
@@ -591,8 +555,6 @@ async function executeCompleteTask(senderNumber, member, action) {
       `Great work! ✅ ${data.task_id} marked complete.`,
     );
 
-    // Notify owner if different from assignee
-    // PRD Reference: Section 9.1
     if (data.owner_id !== member.member_id && data.owner_number) {
       await sendMessage(
         data.owner_number,
@@ -607,7 +569,6 @@ async function executeCompleteTask(senderNumber, member, action) {
 
 // ─────────────────────────────────────────
 // DELETE TASK
-// PRD Reference: Section 6.6
 // ─────────────────────────────────────────
 async function handleDeleteTask(senderNumber, member, ai) {
   try {
@@ -625,8 +586,6 @@ async function handleDeleteTask(senderNumber, member, ai) {
       return;
     }
 
-    // Only owner or organizer can delete
-    // PRD Reference: Section 6.6
     if (task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, "You can only delete tasks you own.");
       return;
@@ -669,7 +628,6 @@ async function executeDeleteTask(senderNumber, member, action) {
   try {
     const data = action.action_data;
 
-    // Soft delete — PRD Reference: Section 13
     await pool.query(
       `UPDATE tasks SET status = 'deleted', updated_at = NOW() WHERE task_id = $1`,
       [data.task_id],
@@ -682,8 +640,6 @@ async function executeDeleteTask(senderNumber, member, action) {
 
     await sendMessage(senderNumber, `${data.task_id} has been deleted.`);
 
-    // Notify assignee if different from owner
-    // PRD Reference: Section 9.1
     if (data.assignee_id !== member.member_id && data.assignee_number) {
       await sendMessage(
         data.assignee_number,
@@ -698,7 +654,6 @@ async function executeDeleteTask(senderNumber, member, action) {
 
 // ─────────────────────────────────────────
 // ADD MEMBER
-// PRD Reference: Section 7.1
 // ─────────────────────────────────────────
 async function handleAddMember(senderNumber, member, ai) {
   try {
@@ -719,36 +674,40 @@ async function handleAddMember(senderNumber, member, ai) {
       return;
     }
 
-    // Check if already a member
+    // Check if this number already exists in the org (any status)
     const existing = await pool.query(
-      `SELECT * FROM members 
-       WHERE org_id = $1 AND whatsapp_number = $2 AND status = 'active'`,
+      `SELECT * FROM members WHERE org_id = $1 AND whatsapp_number = $2`,
       [member.org_id, formattedNumber],
     );
 
     if (existing.rows.length > 0) {
-      await sendMessage(
-        senderNumber,
-        `${ai.member_name} is already a member of ${member.org_name}.`,
+      if (existing.rows[0].status === "active") {
+        await sendMessage(
+          senderNumber,
+          `${ai.member_name} is already a member of ${member.org_name}.`,
+        );
+        return;
+      }
+      // Previously removed → reactivate instead of creating a duplicate
+      await pool.query(
+        `UPDATE members SET status = 'active', name = $1, role = 'member', updated_at = NOW()
+         WHERE member_id = $2`,
+        [ai.member_name, existing.rows[0].member_id],
       );
-      return;
+    } else {
+      // Brand-new member
+      await pool.query(
+        `INSERT INTO members (org_id, name, whatsapp_number, role)
+         VALUES ($1, $2, $3, 'member')`,
+        [member.org_id, ai.member_name, formattedNumber],
+      );
     }
 
-    // Add member
-    await pool.query(
-      `INSERT INTO members (org_id, name, whatsapp_number, role)
-       VALUES ($1, $2, $3, 'member')`,
-      [member.org_id, ai.member_name, formattedNumber],
-    );
-
-    // Notify organizer
     await sendMessage(
       senderNumber,
       `Added ✅ ${ai.member_name} is now a member of ${member.org_name}. They have been notified.`,
     );
 
-    // Send welcome message to new member
-    // PRD Reference: Section 4.2
     await sendMessage(
       formattedNumber,
       `Hi ${ai.member_name}! You've been added to ${member.org_name} on KaryaSetu.\n\nI'm your team's task manager. Here's what you can do:\n• See your tasks: *my tasks*\n• Mark done: *complete [task name]*\n• Get help: *help*\n\nSave this number and send *help* anytime.`,
@@ -761,7 +720,6 @@ async function handleAddMember(senderNumber, member, ai) {
 
 // ─────────────────────────────────────────
 // REMOVE MEMBER
-// PRD Reference: Section 7.2
 // ─────────────────────────────────────────
 async function handleRemoveMember(senderNumber, member, ai) {
   try {
@@ -783,7 +741,6 @@ async function handleRemoveMember(senderNumber, member, ai) {
       return;
     }
 
-    // Don't guess when several members share a name.
     if (matches.length > 1) {
       let msg = `Multiple members named ${ai.member_name}. Reply with the full number to remove:\n\n`;
       matches.forEach((m, i) => {
@@ -795,7 +752,6 @@ async function handleRemoveMember(senderNumber, member, ai) {
 
     const targetMember = matches[0];
 
-    // Count their tasks
     const taskCount = await pool.query(
       `SELECT COUNT(*) FROM tasks 
        WHERE owner_id = $1 AND status NOT IN ('completed', 'deleted')`,
@@ -840,7 +796,6 @@ async function executeRemoveMember(senderNumber, member, action) {
   try {
     const data = action.action_data;
 
-    // Transfer tasks to organizer
     await pool.query(
       `UPDATE tasks SET owner_id = $1, updated_at = NOW()
        WHERE owner_id = $2 AND status NOT IN ('completed', 'deleted')`,
@@ -853,7 +808,6 @@ async function executeRemoveMember(senderNumber, member, action) {
       [member.member_id, data.target_member_id],
     );
 
-    // Set member inactive
     await pool.query(
       `UPDATE members SET status = 'inactive', updated_at = NOW()
        WHERE member_id = $1`,
@@ -865,14 +819,11 @@ async function executeRemoveMember(senderNumber, member, action) {
       [action.action_id],
     );
 
-    // Notify organizer
     await sendMessage(
       senderNumber,
       `${data.target_member_name} has been removed. ${data.task_count} tasks transferred to you.`,
     );
 
-    // Notify removed member
-    // PRD Reference: Section 9.1
     await sendMessage(
       data.target_member_number,
       `You have been removed from ${member.org_name} on KaryaSetu.`,
@@ -993,7 +944,6 @@ async function handleAllTasks(senderNumber, member) {
 
 async function handleOverdueTasks(senderNumber, member) {
   try {
-    // Compare against "today" in the org's timezone, not the DB's.
     const today = todayInTimezone(member.timezone);
     let query, params;
     if (member.role === "organizer") {
@@ -1055,7 +1005,6 @@ async function handleListMembers(senderNumber, member) {
 
 // ─────────────────────────────────────────
 // TASKS ASSIGNED TO A SPECIFIC MEMBER — organizer only
-// PRD Reference: Section 10.2
 // ─────────────────────────────────────────
 async function handleTasksAssignedTo(senderNumber, member, ai) {
   try {
@@ -1096,10 +1045,7 @@ async function handleTasksAssignedTo(senderNumber, member, ai) {
     );
 
     if (result.rows.length === 0) {
-      await sendMessage(
-        senderNumber,
-        `${target.name} has no open tasks.`,
-      );
+      await sendMessage(senderNumber, `${target.name} has no open tasks.`);
       return;
     }
 
