@@ -68,7 +68,7 @@ async function runReminderCheck() {
         const lead = parseInt(task.lead, 10) || 0;
         const when = lead > 0 ? `due on ${dueTxt} (in ${lead} day${lead > 1 ? "s" : ""})` : "due today";
         await send(task.whatsapp_number, `⏰ Reminder: ${task.task_id} — ${task.title} is ${when}.`);
-        await pool.query(`UPDATE tasks SET reminded_on = $1 WHERE task_id = $2`, [today, task.task_id]);
+        await pool.query(`UPDATE tasks SET reminded_on = $1 WHERE task_id = $2 AND org_id = $3`, [today, task.task_id, org.org_id]);
       }
     }
   } catch (error) {
