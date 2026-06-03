@@ -173,11 +173,9 @@ async function handleMessage(incomingMessage, senderNumber) {
     await clearConvoState(member.member_id); // user moved on — abandon the old question
   }
 
-  if (ai.clarification_needed && ai.clarification_question) {
-    await sendMessage(senderNumber, ai.clarification_question);
-    return;
-  }
-
+  // Note: we do NOT short-circuit on ai.clarification_needed. The individual
+  // handlers ask their own follow-up questions AND save conversation state,
+  // so a reply like "KS-001" or "finding nemo" connects to the right action.
   await dispatch(senderNumber, member, ai);
 }
 
