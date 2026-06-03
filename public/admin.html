@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KaryaSetu — Admin Console</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      :root {
+        --bg:#0d0f14; --card:#1c2030; --border:#2a2f42; --accent:#4f7cff;
+        --green:#22c97a; --amber:#f5a623; --red:#ff4f6a; --text:#e8eaf2; --muted:#6b7280;
+      }
+      body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); min-height:100vh; }
+      .wrap { max-width: 1000px; margin: 0 auto; padding: 28px 20px; }
+      h1 { font-size: 22px; margin-bottom: 4px; }
+      h1 span { color: var(--accent); }
+      .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+      .card { background: var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:20px; }
+      .card h2 { font-size:15px; margin-bottom:14px; }
+      label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+      input, select { width:100%; background:#151820; border:1px solid var(--border); border-radius:8px;
+        color:var(--text); font-size:14px; padding:10px 12px; outline:none; }
+      input:focus, select:focus { border-color: var(--accent); }
+      .btn { background: var(--accent); color:#fff; border:none; border-radius:8px; padding:10px 16px;
+        font-size:14px; cursor:pointer; margin-top:14px; }
+      .btn:hover { background:#3d6aff; }
+      .btn-sm { padding:6px 12px; font-size:12px; margin:0; }
+      .btn-amber { background: rgba(245,166,35,.15); color:var(--amber); border:1px solid rgba(245,166,35,.3); }
+      .btn-green { background: rgba(34,201,122,.15); color:var(--green); border:1px solid rgba(34,201,122,.3); }
+      .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:20px; }
+      .stat { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; }
+      .stat .label { font-size:12px; color:var(--muted); }
+      .stat .value { font-size:26px; font-weight:700; color:var(--accent); margin-top:6px; }
+      table { width:100%; border-collapse:collapse; }
+      th { text-align:left; font-size:11px; text-transform:uppercase; color:var(--muted);
+        padding:10px; border-bottom:1px solid var(--border); }
+      td { padding:11px 10px; font-size:13px; border-bottom:1px solid rgba(42,47,66,.5); }
+      .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+      .badge { padding:3px 9px; border-radius:20px; font-size:11px; }
+      .badge-active { background:rgba(34,201,122,.12); color:var(--green); }
+      .badge-suspended { background:rgba(255,79,106,.12); color:var(--red); }
+      .login { max-width:380px; margin:120px auto; }
+      .toast { position:fixed; bottom:24px; right:24px; background:var(--card); border:1px solid var(--border);
+        border-radius:10px; padding:13px 18px; font-size:13px; display:none; }
+      .toast.show { display:block; }
+      .toast.error { border-color:var(--red); color:var(--red); }
+      .toast.success { border-color:var(--green); color:var(--green); }
+    </style>
+  </head>
+  <body>
+    <!-- LOGIN -->
+    <div id="login" class="login">
+      <div class="card">
+        <h1>Karya<span>Setu</span> Admin</h1>
+        <div class="sub">Platform operator console</div>
+        <label>Admin password</label>
+        <input type="password" id="secret" placeholder="Enter admin password" />
+        <button class="btn" style="width:100%" onclick="login()">Enter</button>
+      </div>
+    </div>
+
+    <!-- APP -->
+    <div id="app" class="wrap" style="display:none">
+      <h1>Karya<span>Setu</span> Admin Console</h1>
+      <div class="sub">Create and manage organizations
+        &nbsp;·&nbsp; <a href="#" onclick="logout()" style="color:var(--accent)">Sign out</a></div>
+
+      <div class="stats">
+        <div class="stat"><div class="label">Organizations</div><div class="value" id="mOrgs">—</div></div>
+        <div class="stat"><div class="label">Members</div><div class="value" id="mMembers">—</div></div>
+        <div class="stat"><div class="label">Tasks</div><div class="value" id="mTasks">—</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Create a new organization</h2>
+        <div class="grid2">
+          <div><label>Organization name</label><input id="orgName" placeholder="Acme Logistics" /></div>
+          <div><label>Timezone</label>
+            <select id="orgTz">
+              <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+              <option value="America/New_York">America/New_York (EST)</option>
+              <option value="Asia/Dubai">Asia/Dubai (GST)</option>
+              <option value="Europe/London">Europe/London (GMT)</option>
+            </select>
+          </div>
+          <div><label>Organizer name</label><input id="orgrName" placeholder="Priya Sharma" /></div>
+          <div><label>Organizer WhatsApp (with country code)</label><input id="orgrPhone" placeholder="+919876543210" /></div>
+          <div><label>Organizer email (optional, for panel login)</label><input id="orgrEmail" placeholder="priya@acme.com" /></div>
+        </div>
+        <button class="btn" onclick="createOrg()">Create organization</button>
+      </div>
+
+      <div class="card">
+        <h2>All organizations</h2>
+        <table>
+          <thead><tr>
+            <th>Organization</th><th>Organizer</th><th>Members</th>
+            <th>Open tasks</th><th>Status</th><th>Created</th><th>Action</th>
+          </tr></thead>
+          <tbody id="orgBody"><tr><td colspan="7">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const API = ""; // same server
+      let secret = localStorage.getItem("ks_admin_secret") || "";
+
+      window.onload = () => { if (secret) showApp(); };
+
+      function showApp() {
+        document.getElementById("login").style.display = "none";
+        document.getElementById("app").style.display = "block";
+        loadMetrics();
+        loadOrgs();
+      }
+      function logout() { localStorage.removeItem("ks_admin_secret"); location.reload(); }
+
+      async function adminFetch(path, opts = {}) {
+        return fetch(API + path, {
+          ...opts,
+          headers: { ...(opts.headers || {}), "x-admin-secret": secret },
+        });
+      }
+
+      async function login() {
+        secret = document.getElementById("secret").value.trim();
+        if (!secret) return toast("Enter the password", "error");
+        const res = await adminFetch("/api/admin/metrics");
+        if (res.ok) {
+          localStorage.setItem("ks_admin_secret", secret);
+          showApp();
+        } else {
+          toast("Wrong admin password", "error");
+        }
+      }
+
+      async function loadMetrics() {
+        try {
+          const res = await adminFetch("/api/admin/metrics");
+          if (!res.ok) return;
+          const m = await res.json();
+          document.getElementById("mOrgs").textContent = m.total_orgs;
+          document.getElementById("mMembers").textContent = m.total_members;
+          document.getElementById("mTasks").textContent = m.total_tasks;
+        } catch {}
+      }
+
+      async function loadOrgs() {
+        try {
+          const res = await adminFetch("/api/admin/orgs");
+          if (!res.ok) { toast("Could not load orgs", "error"); return; }
+          const orgs = await res.json();
+          const body = document.getElementById("orgBody");
+          if (!orgs.length) { body.innerHTML = '<tr><td colspan="7">No organizations yet.</td></tr>'; return; }
+          body.innerHTML = orgs.map((o) => {
+            const created = o.created_at ? new Date(o.created_at).toLocaleDateString() : "—";
+            const badge = o.status === "suspended"
+              ? '<span class="badge badge-suspended">suspended</span>'
+              : '<span class="badge badge-active">active</span>';
+            const action = o.status === "suspended"
+              ? `<button class="btn btn-sm btn-green" onclick="setStatus('${o.org_id}','active')">Reactivate</button>`
+              : `<button class="btn btn-sm btn-amber" onclick="setStatus('${o.org_id}','suspended')">Suspend</button>`;
+            return `<tr>
+              <td>${esc(o.org_name)}</td>
+              <td>${esc(o.organizer_name || "—")}</td>
+              <td>${o.member_count}</td>
+              <td>${o.active_task_count}</td>
+              <td>${badge}</td>
+              <td style="color:var(--muted)">${created}</td>
+              <td>${action}</td>
+            </tr>`;
+          }).join("");
+        } catch { toast("Could not load orgs", "error"); }
+      }
+
+      async function createOrg() {
+        const body = {
+          org_name: document.getElementById("orgName").value.trim(),
+          timezone: document.getElementById("orgTz").value,
+          organizer_name: document.getElementById("orgrName").value.trim(),
+          organizer_whatsapp: document.getElementById("orgrPhone").value.trim(),
+          organizer_email: document.getElementById("orgrEmail").value.trim(),
+        };
+        if (!body.org_name || !body.organizer_name || !body.organizer_whatsapp) {
+          return toast("Fill org name, organizer name and WhatsApp", "error");
+        }
+        const res = await adminFetch("/api/admin/orgs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          toast("Organization created", "success");
+          ["orgName","orgrName","orgrPhone","orgrEmail"].forEach(id => document.getElementById(id).value = "");
+          loadMetrics(); loadOrgs();
+        } else {
+          toast(data.error || "Could not create", "error");
+        }
+      }
+
+      async function setStatus(id, status) {
+        const res = await adminFetch(`/api/admin/orgs/${id}/status`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status }),
+        });
+        if (res.ok) { toast("Updated", "success"); loadOrgs(); }
+        else { toast("Could not update", "error"); }
+      }
+
+      function esc(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+          .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+      }
+      function toast(msg, type="success") {
+        const t = document.getElementById("toast");
+        t.textContent = msg; t.className = `toast show ${type}`;
+        setTimeout(() => t.classList.remove("show"), 3000);
+      }
+    </script>
+  </body>
+</html>
