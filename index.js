@@ -18,6 +18,7 @@ app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
 app.use(express.static("public"));
 
 app.use("/api", apiRoutes);
+app.use("/api/admin", require("./admin"));
 
 // ── Verify the request genuinely came from Twilio ──
 function validateTwilioRequest(req) {
