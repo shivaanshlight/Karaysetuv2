@@ -89,11 +89,7 @@ router.patch("/orgs/:id/status", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Status must be active or suspended" });
     }
     await pool.query(
-      `UPDATE organizations
-       SET status = $1,
-           suspended_at = CASE WHEN $1 = 'suspended' THEN NOW() ELSE NULL END,
-           updated_at = NOW()
-       WHERE org_id = $2`,
+      `UPDATE organizations SET status = $1, updated_at = NOW() WHERE org_id = $2`,
       [status, req.params.id],
     );
     res.json({ success: true });
