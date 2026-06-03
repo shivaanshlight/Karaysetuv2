@@ -364,8 +364,8 @@ async function handleCompleteTask(senderNumber, member, ai) {
       return;
     }
     await pool.query(
-      `UPDATE tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE task_id = $1`,
-      [task.task_id],
+      `UPDATE tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE task_id = $1 AND org_id = $2`,
+      [task.task_id, member.org_id],
     );
     await sendMessage(senderNumber, `Great work! ✅ ${task.task_id} marked complete.`);
     if (task.owner_id !== member.member_id && task.owner_number) {
@@ -407,9 +407,9 @@ async function handleUpdateTask(senderNumber, member, ai) {
     }
 
     const parts = [];
-    if (newTitle) { await pool.query(`UPDATE tasks SET title = $1, updated_at = NOW() WHERE task_id = $2`, [newTitle, task.task_id]); parts.push(`description → "${newTitle}"`); }
-    if (newDue) { await pool.query(`UPDATE tasks SET due_date = $1, updated_at = NOW() WHERE task_id = $2`, [newDue, task.task_id]); parts.push(`due date → ${new Date(newDue).toDateString()}`); }
-    if (newPriority) { await pool.query(`UPDATE tasks SET priority = $1, updated_at = NOW() WHERE task_id = $2`, [newPriority, task.task_id]); parts.push(`priority → ${newPriority}`); }
+    if (newTitle) { await pool.query(`UPDATE tasks SET title = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newTitle, task.task_id, member.org_id]); parts.push(`description → "${newTitle}"`); }
+    if (newDue) { await pool.query(`UPDATE tasks SET due_date = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newDue, task.task_id, member.org_id]); parts.push(`due date → ${new Date(newDue).toDateString()}`); }
+    if (newPriority) { await pool.query(`UPDATE tasks SET priority = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newPriority, task.task_id, member.org_id]); parts.push(`priority → ${newPriority}`); }
 
     await sendMessage(senderNumber, `Updated ✅ ${task.task_id} — ${parts.join(", ")}.`);
   } catch (error) {
@@ -447,7 +447,7 @@ async function handleReassignTask(senderNumber, member, ai) {
       return;
     }
     const na = matches[0];
-    await pool.query(`UPDATE tasks SET assignee_id = $1, updated_at = NOW() WHERE task_id = $2`, [na.member_id, task.task_id]);
+    await pool.query(`UPDATE tasks SET assignee_id = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [na.member_id, task.task_id, member.org_id]);
     await sendMessage(senderNumber, `Done ✅ ${task.task_id} assigned to ${na.name}.`);
     if (na.whatsapp_number) {
       await sendMessage(na.whatsapp_number, `📋 New task assigned by ${member.name}:\n${task.task_id} — ${task.title}`);
@@ -476,7 +476,7 @@ async function handleUnassignTask(senderNumber, member, reference) {
       await sendMessage(senderNumber, "Only the task owner or an Organizer can change the assignment.");
       return;
     }
-    await pool.query(`UPDATE tasks SET assignee_id = NULL, updated_at = NOW() WHERE task_id = $1`, [task.task_id]);
+    await pool.query(`UPDATE tasks SET assignee_id = NULL, updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [task.task_id, member.org_id]);
     await sendMessage(senderNumber, `Done ✅ ${task.task_id} is now unassigned.`);
     if (task.assignee_id && task.assignee_id !== member.member_id && task.assignee_number) {
       await sendMessage(task.assignee_number, `${task.task_id} — ${task.title} has been unassigned from you.`);
@@ -510,7 +510,7 @@ async function handleTransferOwnership(senderNumber, member, ai) {
       return;
     }
     const no = matches[0];
-    await pool.query(`UPDATE tasks SET owner_id = $1, updated_at = NOW() WHERE task_id = $2`, [no.member_id, task.task_id]);
+    await pool.query(`UPDATE tasks SET owner_id = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [no.member_id, task.task_id, member.org_id]);
     await sendMessage(senderNumber, `Done ✅ ${no.name} is now the owner of ${task.task_id}.`);
     if (no.whatsapp_number) {
       await sendMessage(no.whatsapp_number, `📋 ${member.name} has transferred ownership of ${task.task_id} — ${task.title} to you.`);
@@ -580,7 +580,7 @@ async function handleConfirmation(senderNumber, member, message) {
 async function executeDeleteTask(senderNumber, member, action) {
   try {
     const data = action.action_data;
-    await pool.query(`UPDATE tasks SET status = 'deleted', updated_at = NOW() WHERE task_id = $1`, [data.task_id]);
+    await pool.query(`UPDATE tasks SET status = 'deleted', updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [data.task_id, member.org_id]);
     await pool.query(`UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`, [action.action_id]);
     await sendMessage(senderNumber, `${data.task_id} has been deleted.`);
     if (data.assignee_id && data.assignee_id !== member.member_id && data.assignee_number) {
