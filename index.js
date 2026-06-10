@@ -7,10 +7,13 @@ const { handleMessage, handleConfirmation, findMember } = require("./bot");
 const { startReminders } = require("./reminders");
 
 const app = express();
+// Needed so req.protocol/req.get('host') reflect the public URL behind a proxy,
+// which the Twilio signature is computed against.
 app.set("trust proxy", true);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+// Lock CORS to the configured frontend origin when provided.
 const allowedOrigin = process.env.FRONTEND_ORIGIN;
 app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
 
@@ -21,6 +24,7 @@ app.use("/api", apiRoutes);
 app.use("/api/admin", require("./admin"));
 
 // ── Verify the request genuinely came from Twilio ──
+// Without this, anyone could POST a spoofed `From` and run organizer commands.
 function validateTwilioRequest(req) {
   if (process.env.SKIP_TWILIO_VALIDATION === "true") return true;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -36,17 +40,22 @@ app.post("/webhook", async (req, res) => {
     return res.status(403).send("Invalid signature");
   }
 
-  const incomingMessage = req.body.Body;
+  // Body is normal text; ButtonText is set when the user taps a quick-reply button.
+  const incomingMessage = req.body.Body || req.body.ButtonText;
   const senderNumber = req.body.From;
 
+  // Always respond to Twilio immediately
   res.writeHead(200, { "Content-Type": "text/xml" });
   res.end("<Response></Response>");
 
+  // Ignore non-text payloads (e.g. media-only messages) — Body may be undefined.
   if (!incomingMessage || !senderNumber) return;
 
   try {
     const message = incomingMessage.trim().toLowerCase();
 
+    // Check if this is a yes/no confirmation FIRST
+    // PRD Reference: Section 6.1 — confirmation rule
     if (["yes", "no", "confirm", "cancel", "1", "2"].includes(message)) {
       const member = await findMember(senderNumber);
       if (member) {
@@ -55,6 +64,7 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
+    // Otherwise handle normally
     await handleMessage(incomingMessage, senderNumber);
   } catch (error) {
     console.log("Webhook error:", error.message);
