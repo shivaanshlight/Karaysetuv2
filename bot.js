@@ -19,6 +19,48 @@ async function sendMessage(to, message) {
   }
 }
 
+// Send a confirmation as interactive Yes/No buttons when a quick-reply content
+// template is configured (CONFIRM_CONTENT_SID). Falls back to plain text so the
+// bot keeps working before the template is set up.
+async function sendConfirm(to, text) {
+  const sid = process.env.CONFIRM_CONTENT_SID;
+  if (sid) {
+    try {
+      await client.messages.create({
+        from: BOT_NUMBER,
+        to,
+        contentSid: sid,
+        contentVariables: JSON.stringify({ "1": text }),
+      });
+      console.log("✅ Confirm buttons sent to:", to);
+      return;
+    } catch (error) {
+      console.log("Button send failed, using text:", error.message);
+    }
+  }
+  await sendMessage(to, `${text}\n\nReply *Yes* or *No*.`);
+}
+
+// Send a message with quick-reply buttons via a content template, falling back
+// to plain text when the template isn't configured yet.
+async function sendWithButtons(to, contentSid, bodyText) {
+  if (contentSid) {
+    try {
+      await client.messages.create({
+        from: BOT_NUMBER,
+        to,
+        contentSid,
+        contentVariables: JSON.stringify({ "1": bodyText }),
+      });
+      console.log("✅ Buttons sent to:", to);
+      return;
+    } catch (error) {
+      console.log("Button send failed, using text:", error.message);
+    }
+  }
+  await sendMessage(to, bodyText);
+}
+
 // ─────────────────────────────────────────
 // CONVERSATION STATE — short-term memory of "what am I waiting for"
 // ─────────────────────────────────────────
@@ -40,6 +82,16 @@ async function getConvoState(memberId) {
 }
 async function clearConvoState(memberId) {
   await pool.query(`DELETE FROM conversation_state WHERE member_id = $1`, [memberId]);
+}
+
+// Remember the last task this member worked on, so "add due date friday" right
+// after creating/handling a task applies to it without re-stating the id.
+async function setLastTask(memberId, taskId) {
+  try {
+    await pool.query(`UPDATE members SET last_task_id = $1 WHERE member_id = $2`, [taskId, memberId]);
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 // ─────────────────────────────────────────
@@ -241,6 +293,14 @@ async function tryResume(senderNumber, member, convo, message, ai) {
     await dispatch(senderNumber, member, { intent: convo.intent, task_reference: convo.task_reference, assignee_name: name });
     return true;
   }
+  if (convo.awaiting === "update_fields") {
+    await clearConvoState(member.member_id);
+    await dispatch(senderNumber, member, {
+      intent: "update_task", task_reference: convo.task_reference,
+      due_date: ai.due_date || null, priority: ai.priority || null, task_title: ai.task_title || null,
+    });
+    return true;
+  }
   if (convo.awaiting === "title") {
     const title = ai.task_title || message.trim();
     await clearConvoState(member.member_id);
@@ -305,7 +365,7 @@ async function handleHelp(senderNumber, member) {
   if (member.role === "organizer") {
     t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n`;
   }
-  await sendMessage(senderNumber, t);
+  await sendWithButtons(senderNumber, process.env.HELP_CONTENT_SID, t);
 }
 
 // ─────────────────────────────────────────
@@ -323,6 +383,7 @@ async function createTaskWithAssignee(senderNumber, member, opts) {
       [taskId, member.org_id, opts.title, member.member_id, member.member_id, opts.assigneeId, opts.due_date || null, opts.priority || "normal"],
     );
     await c.query("COMMIT");
+    await setLastTask(member.member_id, taskId);
     const dueTxt = opts.due_date ? new Date(opts.due_date).toDateString() : "No due date";
     await sendMessage(senderNumber, `Added ✅ ${taskId}\n📋 ${opts.title}\n👤 Assigned to: ${opts.assigneeName}\n📅 Due: ${dueTxt}`);
     if (opts.assigneeId !== member.member_id && opts.assigneeNumber) {
@@ -372,13 +433,15 @@ async function handleCreateTask(senderNumber, member, ai) {
 // ─────────────────────────────────────────
 async function handleCompleteTask(senderNumber, member, ai) {
   try {
-    if (!ai.task_reference) {
+    const reference = ai.task_reference || member.last_task_id;
+    if (!reference) {
       await setConvoState(member.member_id, { awaiting: "task", intent: "complete_task" });
       await sendMessage(senderNumber, "Which task do you want to mark as complete?");
       return;
     }
-    const task = await findTaskByReference(member.org_id, ai.task_reference);
-    if (!task) { await sendMessage(senderNumber, `I couldn't find a task matching "${ai.task_reference}".`); return; }
+    const task = await findTaskByReference(member.org_id, reference);
+    if (!task) { await sendMessage(senderNumber, `I couldn't find a task matching "${reference}".`); return; }
+    await setLastTask(member.member_id, task.task_id);
     if (task.assignee_id !== member.member_id && task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, `${task.task_id} isn't yours, so you can't complete it.`); return;
     }
@@ -395,13 +458,19 @@ async function handleCompleteTask(senderNumber, member, ai) {
 // ─────────────────────────────────────────
 async function handleUpdateTask(senderNumber, member, ai) {
   try {
-    if (!ai.task_reference) {
-      await setConvoState(member.member_id, { awaiting: "task", intent: "update_task" });
+    const reference = ai.task_reference || member.last_task_id;
+    if (!reference) {
+      // Remember what they already asked to change, so it carries over.
+      await setConvoState(member.member_id, {
+        awaiting: "task", intent: "update_task",
+        partial: { due_date: ai.due_date || null, priority: ai.priority || null, task_title: ai.task_title || null },
+      });
       await sendMessage(senderNumber, "Which task do you want to update?");
       return;
     }
-    const task = await findTaskByReference(member.org_id, ai.task_reference);
+    const task = await findTaskByReference(member.org_id, reference);
     if (!task) { await sendMessage(senderNumber, `I couldn't find that task.`); return; }
+    await setLastTask(member.member_id, task.task_id);
     if (task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, "Only the task owner or an Organizer can update a task."); return;
     }
@@ -409,6 +478,8 @@ async function handleUpdateTask(senderNumber, member, ai) {
     const newDue = ai.due_date || null;
     const newPriority = ["high", "normal", "low"].includes(ai.priority) ? ai.priority : null;
     if (!newTitle && !newDue && !newPriority) {
+      // Wait for the change and connect their next message to this task.
+      await setConvoState(member.member_id, { awaiting: "update_fields", task_reference: task.task_id });
       await sendMessage(senderNumber, `What should I change on ${task.task_id}? You can update the description, due date, or priority.`); return;
     }
     const parts = [];
@@ -432,13 +503,15 @@ async function applyReassign(senderNumber, member, task, na) {
 }
 async function handleReassignTask(senderNumber, member, ai) {
   try {
-    if (!ai.task_reference) {
+    const reference = ai.task_reference || member.last_task_id;
+    if (!reference) {
       await setConvoState(member.member_id, { awaiting: "task", intent: "reassign_task", partial: { assignee_name: ai.assignee_name || ai.member_name || null } });
       await sendMessage(senderNumber, "Which task? Example: Assign task KS-001 to Amit");
       return;
     }
-    const task = await findTaskByReference(member.org_id, ai.task_reference);
+    const task = await findTaskByReference(member.org_id, reference);
     if (!task) { await sendMessage(senderNumber, `I couldn't find that task.`); return; }
+    await setLastTask(member.member_id, task.task_id);
     if (task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, "Only the task owner or an Organizer can assign a task."); return;
     }
@@ -464,13 +537,15 @@ async function handleReassignTask(senderNumber, member, ai) {
 // ─────────────────────────────────────────
 async function handleUnassignTask(senderNumber, member, reference) {
   try {
-    if (!reference) {
+    const ref = reference || member.last_task_id;
+    if (!ref) {
       await setConvoState(member.member_id, { awaiting: "task", intent: "unassign_task" });
       await sendMessage(senderNumber, "Which task? Example: Remove assignment KS-001");
       return;
     }
-    const task = await findTaskByReference(member.org_id, reference);
+    const task = await findTaskByReference(member.org_id, ref);
     if (!task) { await sendMessage(senderNumber, `I couldn't find that task.`); return; }
+    await setLastTask(member.member_id, task.task_id);
     if (task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, "Only the task owner or an Organizer can change the assignment."); return;
     }
@@ -492,13 +567,15 @@ async function applyTransfer(senderNumber, member, task, no) {
 }
 async function handleTransferOwnership(senderNumber, member, ai) {
   try {
-    if (!ai.task_reference) {
+    const reference = ai.task_reference || member.last_task_id;
+    if (!reference) {
       await setConvoState(member.member_id, { awaiting: "task", intent: "transfer_ownership", partial: { assignee_name: ai.assignee_name || ai.member_name || null } });
       await sendMessage(senderNumber, "Which task? Example: Transfer KS-001 to Priya");
       return;
     }
-    const task = await findTaskByReference(member.org_id, ai.task_reference);
+    const task = await findTaskByReference(member.org_id, reference);
     if (!task) { await sendMessage(senderNumber, `I couldn't find that task.`); return; }
+    await setLastTask(member.member_id, task.task_id);
     if (task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, "Only the current owner or an Organizer can transfer ownership."); return;
     }
@@ -524,17 +601,19 @@ async function handleTransferOwnership(senderNumber, member, ai) {
 // ─────────────────────────────────────────
 async function handleDeleteTask(senderNumber, member, ai) {
   try {
-    if (!ai.task_reference) {
+    const reference = ai.task_reference || member.last_task_id;
+    if (!reference) {
       await setConvoState(member.member_id, { awaiting: "task", intent: "delete_task" });
       await sendMessage(senderNumber, "Which task do you want to delete?");
       return;
     }
-    const task = await findTaskByReference(member.org_id, ai.task_reference);
+    const task = await findTaskByReference(member.org_id, reference);
     if (!task) { await sendMessage(senderNumber, `I couldn't find that task.`); return; }
+    await setLastTask(member.member_id, task.task_id);
     if (task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, "You can only delete tasks you own."); return;
     }
-    await sendMessage(senderNumber, `⚠️ Delete ${task.task_id} (${task.title})? This cannot be undone. Reply 'yes' to confirm.`);
+    await sendConfirm(senderNumber, `⚠️ Delete ${task.task_id} (${task.title})? This cannot be undone.`);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     await pool.query(
       `INSERT INTO pending_actions (org_id, member_id, action_type, action_data, expires_at) VALUES ($1, $2, $3, $4, $5)`,
@@ -607,7 +686,7 @@ async function handleAddMember(senderNumber, member, ai) {
 async function promptRemove(senderNumber, member, tm) {
   const tc = await pool.query(`SELECT COUNT(*) FROM tasks WHERE owner_id = $1 AND status NOT IN ('completed', 'deleted')`, [tm.member_id]);
   const count = parseInt(tc.rows[0].count);
-  await sendMessage(senderNumber, `Remove ${tm.name} from ${member.org_name}? Their ${count} owned tasks will be transferred to you. (yes/no)`);
+  await sendConfirm(senderNumber, `Remove ${tm.name} from ${member.org_name}? Their ${count} owned tasks will be transferred to you.`);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
   await pool.query(
     `INSERT INTO pending_actions (org_id, member_id, action_type, action_data, expires_at) VALUES ($1, $2, $3, $4, $5)`,
