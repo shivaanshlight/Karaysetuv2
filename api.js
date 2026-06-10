@@ -4,8 +4,40 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("./database");
+const twilio = require("twilio");
 const { verifyToken } = require("./auth");
 const { formatWhatsAppNumber } = require("./utils");
+
+const twClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN,
+);
+const BOT_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
+
+// Welcome a member added from the web panel (best-effort). Uses an approved
+// template when MEMBER_WELCOME_CONTENT_SID is set; otherwise plain text.
+async function sendMemberWelcome(to, name, orgName) {
+  try {
+    const sid = process.env.MEMBER_WELCOME_CONTENT_SID;
+    if (sid) {
+      await twClient.messages.create({
+        from: BOT_NUMBER,
+        to,
+        contentSid: sid,
+        contentVariables: JSON.stringify({ "1": name, "2": orgName }),
+      });
+    } else {
+      await twClient.messages.create({
+        from: BOT_NUMBER,
+        to,
+        body: `Hi ${name}! You've been added to ${orgName} on KaryaSetu — your team's task manager. Send *Help* anytime to see what you can do.`,
+      });
+    }
+    console.log("✅ Member welcome sent to:", to);
+  } catch (error) {
+    console.log("Member welcome failed:", error.message);
+  }
+}
 
 // ── MIDDLEWARE — authenticate the organizer from a bearer token ──
 // The token is issued by /auth/verify-otp and signed with AUTH_SECRET.
@@ -88,19 +120,28 @@ router.post("/members", getOrg, async (req, res) => {
       return res.status(400).json({ error: "Invalid phone number" });
     }
 
-    // Check existing
+    // Check existing (any status) — reactivate if previously removed
     const existing = await pool.query(
-      `SELECT * FROM members WHERE org_id = $1 AND whatsapp_number = $2 AND status = 'active'`,
+      `SELECT * FROM members WHERE org_id = $1 AND whatsapp_number = $2`,
       [req.org.org_id, formatted],
     );
     if (existing.rows.length > 0) {
-      return res.status(400).json({ error: "Member already exists" });
+      if (existing.rows[0].status === "active") {
+        return res.status(400).json({ error: "Member already exists" });
+      }
+      await pool.query(
+        `UPDATE members SET status = 'active', name = $1, role = 'member', updated_at = NOW() WHERE member_id = $2`,
+        [name, existing.rows[0].member_id],
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO members (org_id, name, whatsapp_number, role) VALUES ($1, $2, $3, 'member')`,
+        [req.org.org_id, name, formatted],
+      );
     }
 
-    await pool.query(
-      `INSERT INTO members (org_id, name, whatsapp_number, role) VALUES ($1, $2, $3, 'member')`,
-      [req.org.org_id, name, formatted],
-    );
+    // Notify the new member over WhatsApp (best-effort; won't block the response)
+    sendMemberWelcome(formatted, name, req.org.org_name);
 
     res.json({ success: true, message: `${name} added successfully` });
   } catch (err) {
@@ -161,7 +202,19 @@ router.patch("/settings", getOrg, async (req, res) => {
 });
 const { createToken } = require("./auth");
 const { Resend } = require("resend");
-const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Lazily create the Resend client so the app can still boot (and the WhatsApp
+// bot can run) before email/OTP is configured. Only the OTP login needs it.
+let _resend = null;
+function getResend() {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error(
+      "Email login is not configured yet (RESEND_API_KEY is missing).",
+    );
+  }
+  if (!_resend) _resend = new Resend(process.env.RESEND_API_KEY);
+  return _resend;
+}
 
 const OTP_FROM = process.env.RESEND_FROM || "KaryaSetu <noreply@yourdomain.com>";
 const MAX_OTP_ATTEMPTS = 5;
@@ -215,7 +268,7 @@ router.post("/auth/send-otp", async (req, res) => {
     };
 
     // Send email
-    await resend.emails.send({
+    await getResend().emails.send({
       from: OTP_FROM,
       to: email,
       subject: "Your KaryaSetu login OTP",
