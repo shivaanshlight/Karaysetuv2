@@ -30,7 +30,7 @@ async function sendConfirm(to, text) {
         from: BOT_NUMBER,
         to,
         contentSid: sid,
-        contentVariables: JSON.stringify({ "1": text }),
+        contentVariables: JSON.stringify({ "1": text, action_description: text }),
       });
       console.log("✅ Confirm buttons sent to:", to);
       return;
