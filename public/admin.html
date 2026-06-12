@@ -102,6 +102,29 @@
       </div>
     </div>
 
+    <!-- EDIT ORG MODAL -->
+    <div id="editOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:100;align-items:center;justify-content:center">
+      <div class="card" style="width:460px;max-width:92vw">
+        <h2 style="margin-bottom:14px">Edit organization</h2>
+        <input type="hidden" id="editOrgId" />
+        <label>Organization name</label><input id="editOrgName" />
+        <label>Timezone</label>
+        <select id="editOrgTz">
+          <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+          <option value="America/New_York">America/New_York (EST)</option>
+          <option value="Asia/Dubai">Asia/Dubai (GST)</option>
+          <option value="Europe/London">Europe/London (GMT)</option>
+        </select>
+        <label>Organizer name</label><input id="editOrgrName" />
+        <label>Organizer email (for panel login)</label><input id="editOrgrEmail" placeholder="organizer@company.com" />
+        <label>Organizer WhatsApp</label><input id="editOrgrPhone" placeholder="+919876543210" />
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+          <button class="btn btn-sm" style="background:var(--card);border:1px solid var(--border);color:var(--text)" onclick="closeEditOrg()">Cancel</button>
+          <button class="btn" onclick="saveEditOrg()">Save changes</button>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast"></div>
 
     <script>
@@ -153,6 +176,7 @@
           const res = await adminFetch("/api/admin/orgs");
           if (!res.ok) { toast("Could not load orgs", "error"); return; }
           const orgs = await res.json();
+          window._orgs = orgs;
           const body = document.getElementById("orgBody");
           if (!orgs.length) { body.innerHTML = '<tr><td colspan="7">No organizations yet.</td></tr>'; return; }
           body.innerHTML = orgs.map((o) => {
@@ -160,9 +184,10 @@
             const badge = o.status === "suspended"
               ? '<span class="badge badge-suspended">suspended</span>'
               : '<span class="badge badge-active">active</span>';
-            const action = o.status === "suspended"
+            const statusBtn = o.status === "suspended"
               ? `<button class="btn btn-sm btn-green" onclick="setStatus('${o.org_id}','active')">Reactivate</button>`
               : `<button class="btn btn-sm btn-amber" onclick="setStatus('${o.org_id}','suspended')">Suspend</button>`;
+            const editBtn = `<button class="btn btn-sm" style="background:var(--card);border:1px solid var(--border);color:var(--text)" onclick="openEditOrg('${o.org_id}')">Edit</button>`;
             return `<tr>
               <td>${esc(o.org_name)}</td>
               <td>${esc(o.organizer_name || "—")}</td>
@@ -170,7 +195,7 @@
               <td>${o.active_task_count}</td>
               <td>${badge}</td>
               <td style="color:var(--muted)">${created}</td>
-              <td>${action}</td>
+              <td><div style="display:flex;gap:6px">${editBtn}${statusBtn}</div></td>
             </tr>`;
           }).join("");
         } catch { toast("Could not load orgs", "error"); }
@@ -210,6 +235,38 @@
         });
         if (res.ok) { toast("Updated", "success"); loadOrgs(); }
         else { toast("Could not update", "error"); }
+      }
+
+      function openEditOrg(id) {
+        const o = (window._orgs || []).find((x) => String(x.org_id) === String(id));
+        if (!o) return;
+        document.getElementById("editOrgId").value = o.org_id;
+        document.getElementById("editOrgName").value = o.org_name || "";
+        document.getElementById("editOrgTz").value = o.timezone || "Asia/Kolkata";
+        document.getElementById("editOrgrName").value = o.organizer_name || "";
+        document.getElementById("editOrgrEmail").value = o.organizer_email || "";
+        document.getElementById("editOrgrPhone").value = (o.organizer_whatsapp || "").replace("whatsapp:", "");
+        document.getElementById("editOverlay").style.display = "flex";
+      }
+      function closeEditOrg() { document.getElementById("editOverlay").style.display = "none"; }
+
+      async function saveEditOrg() {
+        const id = document.getElementById("editOrgId").value;
+        const body = {
+          org_name: document.getElementById("editOrgName").value.trim(),
+          timezone: document.getElementById("editOrgTz").value,
+          organizer_name: document.getElementById("editOrgrName").value.trim(),
+          organizer_email: document.getElementById("editOrgrEmail").value.trim(),
+          organizer_whatsapp: document.getElementById("editOrgrPhone").value.trim(),
+        };
+        const res = await adminFetch(`/api/admin/orgs/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) { toast("Organization updated", "success"); closeEditOrg(); loadOrgs(); loadMetrics(); }
+        else { toast(data.error || "Could not update", "error"); }
       }
 
       function esc(s) {
