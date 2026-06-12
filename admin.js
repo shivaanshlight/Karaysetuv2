@@ -83,6 +83,12 @@ router.get("/orgs", requireAdmin, async (req, res) => {
         (SELECT name FROM members m
            WHERE m.org_id = o.org_id AND m.role = 'organizer' AND m.status = 'active'
            ORDER BY m.created_at ASC LIMIT 1) AS organizer_name,
+        (SELECT email FROM members m
+           WHERE m.org_id = o.org_id AND m.role = 'organizer' AND m.status = 'active'
+           ORDER BY m.created_at ASC LIMIT 1) AS organizer_email,
+        (SELECT whatsapp_number FROM members m
+           WHERE m.org_id = o.org_id AND m.role = 'organizer' AND m.status = 'active'
+           ORDER BY m.created_at ASC LIMIT 1) AS organizer_whatsapp,
         (SELECT COUNT(*) FROM members m
            WHERE m.org_id = o.org_id AND m.status = 'active') AS member_count,
         (SELECT COUNT(*) FROM tasks t
@@ -146,6 +152,48 @@ router.post("/orgs", requireAdmin, async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// ── EDIT AN ORGANIZATION (+ its organizer) ──
+router.patch("/orgs/:id", requireAdmin, async (req, res) => {
+  try {
+    const { org_name, timezone, organizer_name, organizer_email, organizer_whatsapp } = req.body;
+
+    await pool.query(
+      `UPDATE organizations
+       SET org_name = COALESCE($1, org_name),
+           timezone = COALESCE($2, timezone),
+           updated_at = NOW()
+       WHERE org_id = $3`,
+      [org_name || null, timezone || null, req.params.id],
+    );
+
+    // Update the organizer record for this org
+    const org = await pool.query(
+      `SELECT member_id FROM members WHERE org_id = $1 AND role = 'organizer' AND status = 'active'
+       ORDER BY created_at ASC LIMIT 1`,
+      [req.params.id],
+    );
+    if (org.rows[0]) {
+      let formatted = null;
+      if (organizer_whatsapp) {
+        formatted = formatWhatsAppNumber(organizer_whatsapp);
+        if (!formatted) return res.status(400).json({ error: "Invalid organizer WhatsApp number" });
+      }
+      await pool.query(
+        `UPDATE members
+         SET name = COALESCE($1, name),
+             email = COALESCE($2, email),
+             whatsapp_number = COALESCE($3, whatsapp_number),
+             updated_at = NOW()
+         WHERE member_id = $4`,
+        [organizer_name || null, organizer_email || null, formatted, org.rows[0].member_id],
+      );
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
