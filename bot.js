@@ -127,6 +127,26 @@ async function findMemberByName(name, orgId) {
   );
   return result.rows;
 }
+async function findMemberByNumber(phone, orgId) {
+  const formatted = formatWhatsAppNumber(phone);
+  if (!formatted) return null;
+  const result = await pool.query(
+    `SELECT * FROM members WHERE org_id = $1 AND whatsapp_number = $2 AND status = 'active' LIMIT 1`,
+    [orgId, formatted],
+  );
+  return result.rows[0] || null;
+}
+// Resolve a person for assign/transfer/remove. If the user supplied a phone
+// number we match exactly on it (skips the "which one?" menu when names clash);
+// otherwise we fall back to a name lookup which may return several matches.
+async function resolveMembers(name, phone, orgId) {
+  if (phone) {
+    const m = await findMemberByNumber(phone, orgId);
+    if (m) return [m];
+  }
+  if (name) return findMemberByName(name, orgId);
+  return [];
+}
 async function findTaskByReference(orgId, reference) {
   const words = String(reference).toLowerCase().split(" ").filter((w) => w.length > 2);
   const wordConditions = words.map((_, i) => `LOWER(t.title) LIKE LOWER($${i + 4})`).join(" OR ");
@@ -419,10 +439,10 @@ async function handleCreateTask(senderNumber, member, ai) {
       await sendMessage(senderNumber, "What should I call this task?");
       return;
     }
-    if (ai.assignee_name) {
-      const matches = await findMemberByName(ai.assignee_name, member.org_id);
+    if (ai.assignee_name || ai.phone_number) {
+      const matches = await resolveMembers(ai.assignee_name, ai.phone_number, member.org_id);
       if (matches.length === 0) {
-        await sendMessage(senderNumber, `${ai.assignee_name} is not a user of ${member.org_name}. Assigning to you instead.`);
+        await sendMessage(senderNumber, `${ai.assignee_name || ai.phone_number} is not a user of ${member.org_name}. Assigning to you instead.`);
         return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
       }
       if (matches.length > 1) {
@@ -527,13 +547,13 @@ async function handleReassignTask(senderNumber, member, ai) {
       await sendMessage(senderNumber, "Only the task owner or an Organizer can assign a task."); return;
     }
     const newName = ai.assignee_name || ai.member_name;
-    if (!newName) {
+    if (!newName && !ai.phone_number) {
       await setConvoState(member.member_id, { awaiting: "assignee", intent: "reassign_task", task_reference: task.task_id });
       await sendMessage(senderNumber, "Who should I assign it to?");
       return;
     }
-    const matches = await findMemberByName(newName, member.org_id);
-    if (matches.length === 0) { await sendMessage(senderNumber, `${newName} is not a user of ${member.org_name}.`); return; }
+    const matches = await resolveMembers(newName, ai.phone_number, member.org_id);
+    if (matches.length === 0) { await sendMessage(senderNumber, `${newName || ai.phone_number} is not a user of ${member.org_name}.`); return; }
     if (matches.length > 1) {
       await setConvoState(member.member_id, { awaiting: "choice", purpose: "reassign", options: optionList(matches), context: { task_id: task.task_id } });
       await sendMessage(senderNumber, choiceMenu(newName, matches));
@@ -591,13 +611,13 @@ async function handleTransferOwnership(senderNumber, member, ai) {
       await sendMessage(senderNumber, "Only the current owner or an Organizer can transfer ownership."); return;
     }
     const newName = ai.assignee_name || ai.member_name;
-    if (!newName) {
+    if (!newName && !ai.phone_number) {
       await setConvoState(member.member_id, { awaiting: "assignee", intent: "transfer_ownership", task_reference: task.task_id });
       await sendMessage(senderNumber, "Who should become the owner?");
       return;
     }
-    const matches = await findMemberByName(newName, member.org_id);
-    if (matches.length === 0) { await sendMessage(senderNumber, `${newName} is not a user of ${member.org_name}.`); return; }
+    const matches = await resolveMembers(newName, ai.phone_number, member.org_id);
+    if (matches.length === 0) { await sendMessage(senderNumber, `${newName || ai.phone_number} is not a user of ${member.org_name}.`); return; }
     if (matches.length > 1) {
       await setConvoState(member.member_id, { awaiting: "choice", purpose: "transfer", options: optionList(matches), context: { task_id: task.task_id } });
       await sendMessage(senderNumber, choiceMenu(newName, matches));
@@ -706,9 +726,9 @@ async function promptRemove(senderNumber, member, tm) {
 }
 async function handleRemoveMember(senderNumber, member, ai) {
   try {
-    if (!ai.member_name) { await sendMessage(senderNumber, "Who do you want to remove? Example: Remove member Priya"); return; }
-    const matches = await findMemberByName(ai.member_name, member.org_id);
-    if (matches.length === 0) { await sendMessage(senderNumber, `${ai.member_name} is not a user of ${member.org_name}.`); return; }
+    if (!ai.member_name && !ai.phone_number) { await sendMessage(senderNumber, "Who do you want to remove? Example: Remove member Priya"); return; }
+    const matches = await resolveMembers(ai.member_name, ai.phone_number, member.org_id);
+    if (matches.length === 0) { await sendMessage(senderNumber, `${ai.member_name || ai.phone_number} is not a user of ${member.org_name}.`); return; }
     if (matches.length > 1) {
       await setConvoState(member.member_id, { awaiting: "choice", purpose: "remove_member", options: optionList(matches) });
       await sendMessage(senderNumber, choiceMenu(ai.member_name, matches));
