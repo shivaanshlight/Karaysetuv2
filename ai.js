@@ -31,13 +31,13 @@ JSON structure:
 {
   "intent": "one of: create_task, list_my_tasks, list_assigned_tasks, list_all_tasks, list_overdue_tasks, complete_task, delete_task, update_task, reassign_task, unassign_task, transfer_ownership, add_member, remove_member, list_members, help, tasks_assigned_to, unknown",
   "confidence": 0.0 to 1.0,
-  "task_title": "the task text (for create) or the NEW text (for update), else null",
-  "assignee_name": "first name of who to assign to, else null",
+  "task_title": "the FULL task text (for create) or the NEW text (for update) — keep ALL of it, even multiple sentences; else null",
+  "assignee_name": "the name of who to assign to, exactly as written (keep initials and full names like 'M Achyuth'), else null",
   "due_date": "YYYY-MM-DD or null",
   "priority": "high or normal or low or null",
   "task_reference": "a task id or partial task name the user is referring to, else null",
-  "member_name": "name of member for add/remove, else null",
-  "phone_number": "phone number for add member, else null",
+  "member_name": "name of member for add/remove, exactly as written (keep initials/full names), else null",
+  "phone_number": "phone number — for add member, OR to identify a specific person when names clash in remove/assign/transfer; else null",
   "clarification_needed": true or false,
   "clarification_question": "a question or null"
 }
@@ -55,6 +55,14 @@ BE TOLERANT OF CASUAL / MESSY INPUT:
 - For "update/change" commands, put any NEW description in task_title and the date in due_date.
 - Resolve all relative dates against today (${today}).
 - Match assignee/member names loosely to the member list above (closest first name).
+- CAPTURE THE FULL TASK: if the task spans several sentences or has extra detail
+  ("call the vendor, confirm the price, and email me the quote by friday"), put the
+  ENTIRE description in task_title — do NOT cut it down to the first few words.
+  Only pull out the due date and assignee; everything else stays in task_title.
+- KEEP NAMES WHOLE: preserve names exactly as typed, including initials and surnames
+  (e.g. "M Achyuth" stays "M Achyuth", not "Achyuth"; "Dr Rao" stays "Dr Rao").
+- IDENTIFY BY NUMBER: if the user includes a phone number to point at a specific person
+  ("assign ks3 to Amit 9876543210", "remove member 9876543210"), put it in phone_number.
 
 Examples:
 "pls add task call the client tmrw" -> {"intent":"create_task","task_title":"call the client","due_date":"<tomorrow>","priority":null,"confidence":0.95}
@@ -63,6 +71,8 @@ Examples:
 "give ks3 to amit" -> {"intent":"reassign_task","task_reference":"KS-003","assignee_name":"Amit","confidence":0.92}
 "chnge due of ks5 to mon" -> {"intent":"update_task","task_reference":"KS-005","due_date":"<next monday>","confidence":0.9}
 "kal tak banner bana do" -> {"intent":"create_task","task_title":"banner","due_date":"<tomorrow>","confidence":0.9}
+"add task call the vendor, confirm pricing and email me the quote by fri" -> {"intent":"create_task","task_title":"call the vendor, confirm pricing and email me the quote","due_date":"<this friday>","confidence":0.92}
+"assign ks3 to M Achyuth 9876543210" -> {"intent":"reassign_task","task_reference":"KS-003","assignee_name":"M Achyuth","phone_number":"9876543210","confidence":0.92}
 "my tasks" -> {"intent":"list_my_tasks","confidence":0.97}
 
 Rules:
