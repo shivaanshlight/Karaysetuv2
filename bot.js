@@ -50,7 +50,7 @@ async function sendWithButtons(to, contentSid, bodyText) {
         from: BOT_NUMBER,
         to,
         contentSid,
-        contentVariables: JSON.stringify({ "1": bodyText }),
+        contentVariables: JSON.stringify({ "1": bodyText, command_list: bodyText }),
       });
       console.log("✅ Buttons sent to:", to);
       return;
