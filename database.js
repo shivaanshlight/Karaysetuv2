@@ -22,6 +22,13 @@ function buildSslConfig() {
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: buildSslConfig(),
+  // Keep connections warm so we don't pay a fresh TLS handshake (slow,
+  // especially across regions) on the first query after an idle period.
+  max: 10,
+  idleTimeoutMillis: 60000, // keep idle clients up to 60s before closing
+  connectionTimeoutMillis: 10000,
+  keepAlive: true, // TCP keep-alive so the socket isn't dropped while idle
+  keepAliveInitialDelayMillis: 10000,
 });
 
 pool.connect((err, client, release) => {
@@ -32,5 +39,14 @@ pool.connect((err, client, release) => {
     release();
   }
 });
+
+// Lightweight keep-warm ping: a cheap SELECT every 4 minutes keeps at least one
+// pooled connection alive, so user messages don't hit a cold reconnect. Costs
+// almost nothing and noticeably smooths out first-message latency.
+setInterval(() => {
+  pool
+    .query("SELECT 1")
+    .catch((e) => console.log("DB keep-warm ping failed:", e.message));
+}, 4 * 60 * 1000);
 
 module.exports = pool;
