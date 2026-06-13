@@ -12,8 +12,9 @@ const BOT_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
 
 async function sendMessage(to, message) {
   try {
+    const ts = Date.now();
     await client.messages.create({ from: BOT_NUMBER, to: to, body: message });
-    console.log("✅ Message sent to:", to);
+    console.log(`✅ Message sent to: ${to} | Twilio send took ${Date.now() - ts}ms`);
   } catch (error) {
     console.log("❌ Failed to send message:", error.message);
   }
@@ -222,6 +223,7 @@ async function handleMessage(incomingMessage, senderNumber) {
   const t0 = Date.now();
   const message = incomingMessage.trim();
   const member = await findMember(senderNumber);
+  console.log(`DB findMember took ${Date.now() - t0}ms`);
   if (!member) {
     await sendMessage(senderNumber, "Hi! You're not registered with a KaryaSetu organization. Ask your Organizer to add you.");
     return;
