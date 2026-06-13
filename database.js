@@ -25,10 +25,10 @@ const pool = new Pool({
   // Keep connections warm so we don't pay a fresh TLS handshake (slow,
   // especially across regions) on the first query after an idle period.
   max: 10,
-  idleTimeoutMillis: 60000, // keep idle clients up to 60s before closing
+  idleTimeoutMillis: 0, // never close idle clients — keep the warm socket open
   connectionTimeoutMillis: 10000,
   keepAlive: true, // TCP keep-alive so the socket isn't dropped while idle
-  keepAliveInitialDelayMillis: 10000,
+  keepAliveInitialDelayMillis: 5000,
 });
 
 pool.connect((err, client, release) => {
@@ -40,13 +40,17 @@ pool.connect((err, client, release) => {
   }
 });
 
-// Lightweight keep-warm ping: a cheap SELECT every 4 minutes keeps at least one
-// pooled connection alive, so user messages don't hit a cold reconnect. Costs
-// almost nothing and noticeably smooths out first-message latency.
+// Keep-warm ping every 30s: a cheap SELECT keeps a pooled connection genuinely
+// warm so user messages never hit a cold reconnect (a fresh cross-region TLS
+// handshake costs ~1.5s). Frequent enough to stay ahead of any server-side
+// idle disconnect. Costs almost nothing.
 setInterval(() => {
   pool
     .query("SELECT 1")
     .catch((e) => console.log("DB keep-warm ping failed:", e.message));
-}, 4 * 60 * 1000);
+}, 30 * 1000);
+
+// Prime a connection immediately at boot so the very first user message is warm.
+pool.query("SELECT 1").catch(() => {});
 
 module.exports = pool;
