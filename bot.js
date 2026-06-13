@@ -30,7 +30,7 @@ async function sendConfirm(to, text) {
         from: BOT_NUMBER,
         to,
         contentSid: sid,
-        contentVariables: JSON.stringify({ "1": text, action_description: text }),
+        contentVariables: JSON.stringify({ action_description: text }),
       });
       console.log("✅ Confirm buttons sent to:", to);
       return;
@@ -42,15 +42,17 @@ async function sendConfirm(to, text) {
 }
 
 // Send a message with quick-reply buttons via a content template, falling back
-// to plain text when the template isn't configured yet.
-async function sendWithButtons(to, contentSid, bodyText) {
+// to plain text when the template isn't configured or the send fails.
+// `vars` is the contentVariables object (must match the template's variables;
+// values cannot contain newlines). `fallbackText` is the plain-text version.
+async function sendWithButtons(to, contentSid, vars, fallbackText) {
   if (contentSid) {
     try {
       await client.messages.create({
         from: BOT_NUMBER,
         to,
         contentSid,
-        contentVariables: JSON.stringify({ "1": bodyText, command_list: bodyText }),
+        contentVariables: JSON.stringify(vars),
       });
       console.log("✅ Buttons sent to:", to);
       return;
@@ -58,7 +60,7 @@ async function sendWithButtons(to, contentSid, bodyText) {
       console.log("Button send failed, using text:", error.message);
     }
   }
-  await sendMessage(to, bodyText);
+  await sendMessage(to, fallbackText);
 }
 
 // ─────────────────────────────────────────
@@ -365,7 +367,16 @@ async function handleHelp(senderNumber, member) {
   if (member.role === "organizer") {
     t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n`;
   }
-  await sendWithButtons(senderNumber, process.env.HELP_CONTENT_SID, t);
+  // Template variables can't contain newlines, so pass a single-line summary
+  // for the buttons template; the full multi-line text is the fallback.
+  const commandLine =
+    "List tasks, Delegated tasks, Overdue tasks, Add task, Update, Complete, Delete, Assign task, Remove assignment";
+  await sendWithButtons(
+    senderNumber,
+    process.env.HELP_CONTENT_SID,
+    { command_list: commandLine },
+    t,
+  );
 }
 
 // ─────────────────────────────────────────
