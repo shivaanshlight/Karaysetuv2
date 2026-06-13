@@ -457,29 +457,32 @@ async function handleHelp(senderNumber, member) {
 // CREATE TASK (instant, default to self)
 // ─────────────────────────────────────────
 async function createTaskWithAssignee(senderNumber, member, opts) {
-  const c = await pool.connect();
   try {
-    await c.query("BEGIN");
-    const cr = await c.query(`UPDATE organizations SET task_counter = task_counter + 1 WHERE org_id = $1 RETURNING task_counter`, [member.org_id]);
-    const taskId = `KS-${String(cr.rows[0].task_counter).padStart(3, "0")}`;
-    await c.query(
-      `INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, priority)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [taskId, member.org_id, opts.title, member.member_id, member.member_id, opts.assigneeId, opts.due_date || null, opts.priority || "normal"],
+    // Counter bump + insert in ONE atomic statement (one DB round-trip instead
+    // of connect + BEGIN + UPDATE + INSERT + COMMIT). A single statement is
+    // already atomic, so no explicit transaction is needed.
+    const r = await pool.query(
+      `WITH bumped AS (
+         UPDATE organizations SET task_counter = task_counter + 1
+         WHERE org_id = $1 RETURNING task_counter
+       )
+       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, priority)
+       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4, $5, $6
+       FROM bumped
+       RETURNING task_id`,
+      [member.org_id, opts.title, member.member_id, opts.assigneeId, opts.due_date || null, opts.priority || "normal"],
     );
-    await c.query("COMMIT");
-    await setLastTask(member.member_id, taskId);
+    const taskId = r.rows[0].task_id;
     const dueTxt = opts.due_date ? new Date(opts.due_date).toDateString() : "No due date";
     await sendMessage(senderNumber, `Added ✅ ${taskId}\n📋 ${opts.title}\n👤 Assigned to: ${opts.assigneeName}\n📅 Due: ${dueTxt}`);
+    // Non-blocking: remember last task; don't make the user wait on it.
+    setLastTask(member.member_id, taskId);
     if (opts.assigneeId !== member.member_id && opts.assigneeNumber) {
       await sendMessage(opts.assigneeNumber, `📋 New task assigned by ${member.name}:\n${taskId} — ${opts.title}${opts.due_date ? `\n📅 Due: ${dueTxt}` : ""}`);
     }
   } catch (error) {
-    await c.query("ROLLBACK").catch(() => {});
     console.log("Error creating task:", error.message);
     await sendMessage(senderNumber, "Something went wrong. Please try again.");
-  } finally {
-    c.release();
   }
 }
 
