@@ -476,10 +476,22 @@ async function handleCompleteTask(senderNumber, member, ai) {
     if (task.assignee_id !== member.member_id && task.owner_id !== member.member_id && member.role !== "organizer") {
       await sendMessage(senderNumber, `${task.task_id} isn't yours, so you can't complete it.`); return;
     }
-    await pool.query(`UPDATE tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [task.task_id, member.org_id]);
-    await sendMessage(senderNumber, `Great work! ✅ ${task.task_id} marked complete.`);
-    if (task.owner_id !== member.member_id && task.owner_number) {
-      await sendMessage(task.owner_number, `✅ ${task.task_id} — ${task.title} has been completed by ${member.name}.`);
+    await sendConfirm(senderNumber, `Mark ${task.task_id} (${task.title}) as complete?`);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO pending_actions (org_id, member_id, action_type, action_data, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+      [member.org_id, member.member_id, "complete_task", JSON.stringify({ task_id: task.task_id, task_title: task.title, owner_id: task.owner_id, owner_number: task.owner_number }), expiresAt],
+    );
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+async function executeCompleteTask(senderNumber, member, action) {
+  try {
+    const data = action.action_data;
+    await pool.query(`UPDATE tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [data.task_id, member.org_id]);
+    await pool.query(`UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`, [action.action_id]);
+    await sendMessage(senderNumber, `Great work! ✅ ${data.task_id} marked complete.`);
+    if (data.owner_id !== member.member_id && data.owner_number) {
+      await sendMessage(data.owner_number, `✅ ${data.task_id} — ${data.task_title} has been completed by ${member.name}.`);
     }
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
@@ -675,6 +687,7 @@ async function handleConfirmation(senderNumber, member, message) {
   }
   if (action.action_type === "delete_task") await executeDeleteTask(senderNumber, member, action);
   else if (action.action_type === "remove_member") await executeRemoveMember(senderNumber, member, action);
+  else if (action.action_type === "complete_task") await executeCompleteTask(senderNumber, member, action);
   return true;
 }
 async function executeDeleteTask(senderNumber, member, action) {
