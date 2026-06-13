@@ -168,6 +168,36 @@ async function findTaskByReference(orgId, reference) {
   return result.rows[0] || null;
 }
 
+// ─────────────────────────────────────────
+// FAST-PATH — skip the AI for unambiguous, parameter-free commands.
+// Matching is EXACT (after light normalization) against a curated whitelist, so
+// it can never misfire on a longer/ambiguous sentence — anything that isn't an
+// exact match falls through to the AI. Phrases like "list tasks" are deliberately
+// left OUT because their meaning can vary; the AI handles those.
+// ─────────────────────────────────────────
+function normalizeCmd(text) {
+  return String(text)
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ") // drop punctuation/emoji
+    .replace(/\s+/g, " ")
+    .trim();
+}
+const FAST_PATHS = {
+  list_my_tasks: new Set(["my tasks", "my task", "my open tasks", "my open task", "mytasks"]),
+  list_assigned_tasks: new Set(["delegated tasks", "delegated task", "delegated", "tasks i assigned", "tasks i delegated", "task i assigned"]),
+  list_overdue_tasks: new Set(["overdue", "overdue tasks", "overdue task", "my overdue tasks", "overdue tasks list"]),
+  list_all_tasks: new Set(["all tasks", "all open tasks", "all task", "all open task"]),
+  list_members: new Set(["list members", "list users", "list member", "list user", "all members", "all users"]),
+  help: new Set(["help", "help me", "menu", "commands", "command list", "what can you do", "what can i do"]),
+};
+function fastPathIntent(message) {
+  const n = normalizeCmd(message);
+  for (const intent in FAST_PATHS) {
+    if (FAST_PATHS[intent].has(n)) return intent;
+  }
+  return null;
+}
+
 // Parse a disambiguation reply ("1", "2", a name, or a phone fragment) into an index.
 function parseChoice(message, options) {
   const m = String(message).trim();
@@ -189,6 +219,7 @@ async function handleMessage(incomingMessage, senderNumber) {
   console.log("─────────────────────────────");
   console.log("From:", senderNumber, "| Message:", incomingMessage);
 
+  const t0 = Date.now();
   const message = incomingMessage.trim();
   const member = await findMember(senderNumber);
   if (!member) {
@@ -233,11 +264,31 @@ async function handleMessage(incomingMessage, senderNumber) {
     await handleUnassignTask(senderNumber, member, ref);
     return;
   }
+  // "Add task" with nothing after it (e.g. tapping the Add task button) — don't
+  // create a literal "add task" task; ask what the task is and wait for the reply.
+  if (/^(add|create|new)\s+(a\s+)?task$/i.test(lower)) {
+    await setConvoState(member.member_id, { awaiting: "title", partial: { assignee_name: null, due_date: null, priority: null } });
+    await sendMessage(senderNumber, "Sure! What's the task? Just type it below — for example:\n*Call the supplier by Friday*");
+    return;
+  }
+
+  // ── Fast-path: unambiguous, parameter-free commands skip the AI for speed.
+  // Only when there's NO pending question, so we never hijack a multi-turn reply.
+  const fpIntent = fastPathIntent(lower);
+  if (fpIntent) {
+    const pending = await getConvoState(member.member_id);
+    if (!pending) {
+      console.log(`⚡ Fast-path: ${fpIntent} | ${Date.now() - t0}ms (no AI)`);
+      await dispatch(senderNumber, member, { intent: fpIntent, confidence: 1 });
+      return;
+    }
+  }
 
   const orgMembers = await getOrgMembers(member.org_id);
   const today = todayInTimezone(member.timezone);
+  const aiStart = Date.now();
   const ai = await understandMessage(message, member.name, orgMembers, today);
-  console.log("AI intent:", ai.intent, "| Confidence:", ai.confidence);
+  console.log(`AI intent: ${ai.intent} | Confidence: ${ai.confidence} | AI took ${Date.now() - aiStart}ms`);
 
   // ── Conversation memory: try to treat this message as an answer ──
   const convo = await getConvoState(member.member_id);
@@ -251,6 +302,7 @@ async function handleMessage(incomingMessage, senderNumber) {
   // handlers ask their own follow-up questions AND save conversation state,
   // so a reply like "KS-001" or "finding nemo" connects to the right action.
   await dispatch(senderNumber, member, ai);
+  console.log(`✓ Handled "${ai.intent}" in ${Date.now() - t0}ms (with AI)`);
 }
 
 // Routes an AI result to the correct handler.
@@ -431,6 +483,11 @@ async function createTaskWithAssignee(senderNumber, member, opts) {
 
 async function handleCreateTask(senderNumber, member, ai) {
   try {
+    // Guard: if the parsed title is just the command word ("add task" etc.),
+    // treat it as no title so we prompt instead of creating a junk task.
+    if (ai.task_title && /^(add|create|new)\s+(a\s+)?task$/i.test(ai.task_title.trim())) {
+      ai.task_title = null;
+    }
     if (!ai.task_title) {
       await setConvoState(member.member_id, {
         awaiting: "title",
