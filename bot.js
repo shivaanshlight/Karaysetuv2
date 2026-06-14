@@ -63,12 +63,13 @@ async function sendWithButtons(to, contentSid, vars, fallbackText) {
   await sendMessage(to, fallbackText);
 }
 
-// Send a list, then — only when there's a next page — a Yes/No prompt using the
-// EXISTING confirm button template (CONFIRM_CONTENT_SID). Tapping Yes loads the
-// next page (handled in handleConfirmation). Falls back to "Reply Yes or No" text.
-async function sendListWithMore(to, response, hasMore, remaining) {
+// Send a list page, then — only when there's a next page — a Yes/No prompt using
+// the EXISTING confirm button template (Yes = next page, handled in
+// handleConfirmation). "back" is a text command for the previous page.
+async function sendListPage(to, response, hasNext, hasPrev, remaining) {
+  if (hasPrev) response += `\n↩️ Reply *back* for the previous page.`;
   await sendMessage(to, response);
-  if (hasMore) await sendConfirm(to, `Show the next ${remaining}?`);
+  if (hasNext) await sendConfirm(to, `Show the next ${remaining}?`);
 }
 
 // Format a due date (+ optional time) for display, e.g. "Fri Jun 20 2026" or
@@ -300,6 +301,11 @@ async function handleMessage(incomingMessage, senderNumber) {
     await handleMore(senderNumber, member);
     return;
   }
+  // "back" / "previous" — go to the previous page of the last list.
+  if (/^(back|previous|prev|previous page|go back)$/i.test(lower)) {
+    await handlePrevious(senderNumber, member);
+    return;
+  }
 
   // ── Fast-path: unambiguous, parameter-free commands skip the AI for speed.
   // Only when there's NO pending question, so we never hijack a multi-turn reply.
@@ -477,7 +483,7 @@ async function handleHelp(senderNumber, member) {
   t += `• Add task [description]\n• Update [task] [new description]\n`;
   t += `• Complete [task name or id]\n• Delete [task id]\n`;
   t += `• Assign task [task] to [user]\n• Remove assignment [task]\n`;
-  t += `_Long lists show 5 at a time — reply *more* for the next page._\n\n`;
+  t += `_Long lists show 5 at a time — reply *more* for next, *back* for previous._\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
     t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n`;
@@ -944,26 +950,27 @@ function taskListSpec(kind, member, extra) {
 async function renderTaskPage(senderNumber, member, kind, offset, extra) {
   const spec = taskListSpec(kind, member, extra);
   if (!spec) return;
-  const off = Math.max(0, parseInt(offset, 10) || 0);
+  let off = Math.max(0, parseInt(offset, 10) || 0);
   const countRes = await pool.query(`SELECT COUNT(*) FROM tasks t WHERE ${spec.where}`, spec.params);
   const total = parseInt(countRes.rows[0].count, 10);
   if (total === 0) { await clearLastList(member.member_id); await sendMessage(senderNumber, spec.empty); return; }
+  if (off >= total) { await sendMessage(senderNumber, "You're already on the last page."); return; }
   const rowsRes = await pool.query(
     `SELECT t.*, asn.name as assignee_name FROM tasks t LEFT JOIN members asn ON t.assignee_id = asn.member_id
      WHERE ${spec.where} ORDER BY ${spec.order} LIMIT ${PAGE_SIZE} OFFSET ${off}`,
     spec.params,
   );
   const rows = rowsRes.rows;
-  const start = off + 1, end = off + rows.length;
-  let response = `*${spec.header} (${total})*` + (total > PAGE_SIZE ? ` — showing ${start}-${end}` : "") + `:\n\n`;
+  const end = off + rows.length;
+  const page = Math.floor(off / PAGE_SIZE) + 1, pages = Math.ceil(total / PAGE_SIZE);
+  let response = `*${spec.header} (${total})*` + (total > PAGE_SIZE ? ` — page ${page}/${pages}` : "") + `:\n\n`;
   for (const task of rows) {
     const prefix = spec.overdue ? "⚠️ " : "";
     response += `${prefix}${task.task_id} | ${task.title} | ${task.assignee_name || "Unassigned"} | Due: ${formatDue(task.due_date, task.due_time)}\n`;
   }
-  const hasMore = end < total;
-  if (hasMore) await setLastList(member.member_id, { type: "tasks", kind, offset: end, extra: extra || null });
+  if (total > PAGE_SIZE) await setLastList(member.member_id, { type: "tasks", kind, offset: off, extra: extra || null });
   else await clearLastList(member.member_id);
-  await sendListWithMore(senderNumber, response, hasMore, Math.min(PAGE_SIZE, total - end));
+  await sendListPage(senderNumber, response, end < total, off > 0, Math.min(PAGE_SIZE, total - end));
 }
 
 async function handleMyTasks(senderNumber, member) {
@@ -988,9 +995,10 @@ async function listTasksFor(senderNumber, member, target) {
 
 // Members list (also paginated).
 async function renderMembersPage(senderNumber, member, offset) {
-  const off = Math.max(0, parseInt(offset, 10) || 0);
+  let off = Math.max(0, parseInt(offset, 10) || 0);
   const countRes = await pool.query(`SELECT COUNT(*) FROM members WHERE org_id = $1 AND status = 'active'`, [member.org_id]);
   const total = parseInt(countRes.rows[0].count, 10);
+  if (total > 0 && off >= total) { await sendMessage(senderNumber, "You're already on the last page."); return; }
   const result = await pool.query(
     `SELECT m.*, COUNT(t.task_id) as open_task_count FROM members m
      LEFT JOIN tasks t ON t.assignee_id = m.member_id AND t.status NOT IN ('completed', 'deleted')
@@ -998,27 +1006,39 @@ async function renderMembersPage(senderNumber, member, offset) {
     [member.org_id],
   );
   const rows = result.rows;
-  const start = off + 1, end = off + rows.length;
-  let response = `*${member.org_name} users (${total})*` + (total > PAGE_SIZE ? ` — showing ${start}-${end}` : "") + `:\n\n`;
+  const end = off + rows.length;
+  const page = Math.floor(off / PAGE_SIZE) + 1, pages = Math.ceil(total / PAGE_SIZE);
+  let response = `*${member.org_name} users (${total})*` + (total > PAGE_SIZE ? ` — page ${page}/${pages}` : "") + `:\n\n`;
   rows.forEach((m, i) => { response += `${off + i + 1}. ${m.name} — ${m.role} — ${m.open_task_count} open tasks\n`; });
-  const hasMore = end < total;
-  if (hasMore) await setLastList(member.member_id, { type: "members", offset: end });
+  if (total > PAGE_SIZE) await setLastList(member.member_id, { type: "members", offset: off });
   else await clearLastList(member.member_id);
-  await sendListWithMore(senderNumber, response, hasMore, Math.min(PAGE_SIZE, total - end));
+  await sendListPage(senderNumber, response, end < total, off > 0, Math.min(PAGE_SIZE, total - end));
 }
 async function handleListMembers(senderNumber, member) {
   try { await renderMembersPage(senderNumber, member, 0); }
   catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
 
-// "more" — continue the last list from where it left off.
+// Render a page from a saved list spec at a given offset.
+async function renderFromSpec(senderNumber, member, spec, offset) {
+  if (spec.type === "members") return renderMembersPage(senderNumber, member, offset);
+  return renderTaskPage(senderNumber, member, spec.kind, offset, spec.extra || undefined);
+}
+// "more" / "next" — the next page of the last list.
 async function handleMore(senderNumber, member) {
   const spec = member.last_list;
-  if (!spec) { await sendMessage(senderNumber, "There's nothing more to show. Send a list first, e.g. *my tasks*."); return; }
-  try {
-    if (spec.type === "members") return renderMembersPage(senderNumber, member, spec.offset);
-    return renderTaskPage(senderNumber, member, spec.kind, spec.offset, spec.extra || undefined);
-  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+  if (!spec) { await sendMessage(senderNumber, "There's nothing to page through. Send a list first, e.g. *my tasks*."); return; }
+  try { return renderFromSpec(senderNumber, member, spec, (spec.offset || 0) + PAGE_SIZE); }
+  catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+// "back" / "previous" — the previous page of the last list.
+async function handlePrevious(senderNumber, member) {
+  const spec = member.last_list;
+  if (!spec) { await sendMessage(senderNumber, "There's nothing to page through. Send a list first, e.g. *my tasks*."); return; }
+  const prev = (spec.offset || 0) - PAGE_SIZE;
+  if (prev < 0) { await sendMessage(senderNumber, "You're already on the first page."); return; }
+  try { return renderFromSpec(senderNumber, member, spec, prev); }
+  catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
 
 async function handleTasksAssignedTo(senderNumber, member, ai) {
