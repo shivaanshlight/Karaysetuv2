@@ -398,11 +398,23 @@
         document.getElementById("taskBody").innerHTML = filtered.length ? filtered.map((t) => taskRow(t, true)).join("") : emptyRow(7, "No tasks found", "Try changing the filters");
       }
 
+      // Turn a "HH:MM[:SS]" 24-hour string into "5:00 PM".
+      function formatDueTime(t) {
+        const parts = String(t).split(":");
+        let h = parseInt(parts[0], 10);
+        if (isNaN(h)) return "";
+        const m = (parts[1] || "00").padStart(2, "0");
+        const ampm = h >= 12 ? "PM" : "AM";
+        h = ((h + 11) % 12) + 1;
+        return `${h}:${m} ${ampm}`;
+      }
+
       function taskRow(t, showOwner = false) {
         const today = new Date().toISOString().split("T")[0];
         const dueYMD = t.due_date ? String(t.due_date).split("T")[0] : null;
         const isOverdue = dueYMD && dueYMD < today && t.status !== "completed";
-        const due = dueYMD ? new Date(dueYMD + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—";
+        let due = dueYMD ? new Date(dueYMD + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—";
+        if (dueYMD && t.due_time) due += ", " + formatDueTime(t.due_time);
         const statusBadge = {
           open: '<span class="badge badge-open">● Open</span>',
           in_progress: '<span class="badge badge-progress">⟳ In Progress</span>',
@@ -433,15 +445,27 @@
         const phone = String(m.whatsapp_number || "").replace("whatsapp:", "");
         const date = m.created_at ? new Date(m.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "—";
         const roleBadge = m.role === "organizer" ? '<span class="badge badge-organizer">Organizer</span>' : '<span class="badge badge-member">Member</span>';
-        const removeBtn = m.role !== "organizer" ? `<button class="btn btn-danger btn-sm" onclick="openRemoveMember('${escapeHtml(m.member_id)}')">Remove</button>` : '<span style="color:var(--muted);font-size:12px">—</span>';
+        const renameBtn = `<button class="btn btn-ghost btn-sm" onclick="renameMember('${escapeHtml(m.member_id)}', '${escapeHtml(String(m.name).replace(/'/g, "\\'"))}')">Rename</button>`;
+        const removeBtn = m.role !== "organizer" ? `<button class="btn btn-danger btn-sm" onclick="openRemoveMember('${escapeHtml(m.member_id)}')">Remove</button>` : '';
         return `<tr>
           <td><div class="member-cell"><div class="avatar">${escapeHtml(initials)}</div>${escapeHtml(m.name)}</div></td>
           <td style="color:var(--muted);font-size:12px">${escapeHtml(phone)}</td>
           <td>${roleBadge}</td>
           <td><span style="font-weight:600">${escapeHtml(m.open_task_count || 0)}</span></td>
           <td style="color:var(--muted);font-size:12px">${date}</td>
-          <td>${removeBtn}</td>
+          <td style="white-space:nowrap">${renameBtn} ${removeBtn}</td>
         </tr>`;
+      }
+      // CR-1: rename a member (phone number stays fixed).
+      async function renameMember(memberId, currentName) {
+        const name = prompt("New name (phone number can't be changed):", currentName);
+        if (name === null) return;
+        if (!name.trim()) { showToast("Name can't be empty", "error"); return; }
+        try {
+          const res = await apiFetch(`/api/members/${memberId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() }) });
+          if (res.ok) { showToast("Name updated", "success"); await loadMembers(); renderMembers(); }
+          else { const e = await res.json().catch(() => ({})); showToast(e.error || "Could not rename", "error"); }
+        } catch (err) { showToast("Could not rename", "error"); }
       }
 
       // ── ADD MEMBER ──
