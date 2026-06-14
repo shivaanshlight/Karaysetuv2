@@ -29,15 +29,17 @@ Return ONLY a valid JSON object. No explanation. No extra text. Just JSON.
 
 JSON structure:
 {
-  "intent": "one of: create_task, list_my_tasks, list_assigned_tasks, list_all_tasks, list_overdue_tasks, complete_task, delete_task, update_task, reassign_task, unassign_task, transfer_ownership, add_member, remove_member, list_members, help, tasks_assigned_to, unknown",
+  "intent": "one of: create_task, list_my_tasks, list_assigned_tasks, list_all_tasks, list_overdue_tasks, complete_task, delete_task, update_task, reassign_task, unassign_task, transfer_ownership, add_member, remove_member, update_member_name, list_members, help, tasks_assigned_to, unknown",
   "confidence": 0.0 to 1.0,
   "task_title": "the FULL task text (for create) or the NEW text (for update) — keep ALL of it, even multiple sentences; else null",
   "assignee_name": "the name of who to assign to, exactly as written (keep initials and full names like 'M Achyuth'), else null",
   "due_date": "YYYY-MM-DD or null",
+  "due_time": "24-hour time HH:MM if the user gave a time (e.g. '5pm'->'17:00', '9:30 am'->'09:30'), else null",
   "priority": "high or normal or low or null",
   "task_reference": "a task id or partial task name the user is referring to, else null",
-  "member_name": "name of member for add/remove, exactly as written (keep initials/full names), else null",
-  "phone_number": "phone number — for add member, OR to identify a specific person when names clash in remove/assign/transfer; else null",
+  "member_name": "name of member for add/remove/rename (the CURRENT name), exactly as written, else null",
+  "new_name": "the NEW name for a rename command, else null",
+  "phone_number": "phone number — for add member, OR to identify a specific person when names clash in remove/assign/transfer/rename; else null",
   "clarification_needed": true or false,
   "clarification_question": "a question or null"
 }
@@ -63,6 +65,14 @@ BE TOLERANT OF CASUAL / MESSY INPUT:
   (e.g. "M Achyuth" stays "M Achyuth", not "Achyuth"; "Dr Rao" stays "Dr Rao").
 - IDENTIFY BY NUMBER: if the user includes a phone number to point at a specific person
   ("assign ks3 to Amit 9876543210", "remove member 9876543210"), put it in phone_number.
+- BARE "ADD TASK": if the message is only "add task" / "create task" / "new task" with NO
+  actual task described, set intent to create_task and task_title to null (do NOT use the
+  words "add task" as the title) — the bot will then ask what the task is.
+- DUE TIME: if the user mentions a time of day ("by 5pm", "tomorrow 9:30am", "due fri 6 pm"),
+  put the date in due_date AND the time in due_time as 24-hour HH:MM. If no time is given,
+  leave due_time null.
+- RENAME: "rename/change name of [current] to [new]" -> intent update_member_name, with
+  member_name = current name (or phone_number if given) and new_name = the new name.
 
 Examples:
 "pls add task call the client tmrw" -> {"intent":"create_task","task_title":"call the client","due_date":"<tomorrow>","priority":null,"confidence":0.95}
@@ -73,6 +83,10 @@ Examples:
 "kal tak banner bana do" -> {"intent":"create_task","task_title":"banner","due_date":"<tomorrow>","confidence":0.9}
 "add task call the vendor, confirm pricing and email me the quote by fri" -> {"intent":"create_task","task_title":"call the vendor, confirm pricing and email me the quote","due_date":"<this friday>","confidence":0.92}
 "assign ks3 to M Achyuth 9876543210" -> {"intent":"reassign_task","task_reference":"KS-003","assignee_name":"M Achyuth","phone_number":"9876543210","confidence":0.92}
+"add task" -> {"intent":"create_task","task_title":null,"confidence":0.9}
+"add task submit report by tomorrow 5pm" -> {"intent":"create_task","task_title":"submit report","due_date":"<tomorrow>","due_time":"17:00","confidence":0.93}
+"rename Achyuth to Achyuth Kumar" -> {"intent":"update_member_name","member_name":"Achyuth","new_name":"Achyuth Kumar","confidence":0.95}
+"change name of 9740070902 to Priya Sharma" -> {"intent":"update_member_name","phone_number":"9740070902","new_name":"Priya Sharma","confidence":0.93}
 "my tasks" -> {"intent":"list_my_tasks","confidence":0.97}
 
 Rules:
@@ -80,7 +94,7 @@ Rules:
 - Never invent an assignee if no name is given.`;
 
     const response = await getGroq().chat.completions.create({
-      model: "llama-3.3-70b-versatile",   
+      model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.1,
       max_tokens: 500,
