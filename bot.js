@@ -49,12 +49,11 @@ async function sendConfirm(to, text) {
 async function sendWithButtons(to, contentSid, vars, fallbackText) {
   if (contentSid) {
     try {
-      await client.messages.create({
-        from: BOT_NUMBER,
-        to,
-        contentSid,
-        contentVariables: JSON.stringify(vars),
-      });
+      const payload = { from: BOT_NUMBER, to, contentSid };
+      // Only attach contentVariables when the template actually has variables —
+      // sending them to a no-variable template makes Twilio reject the message.
+      if (vars && Object.keys(vars).length) payload.contentVariables = JSON.stringify(vars);
+      await client.messages.create(payload);
       console.log("✅ Buttons sent to:", to);
       return;
     } catch (error) {
@@ -62,6 +61,14 @@ async function sendWithButtons(to, contentSid, vars, fallbackText) {
     }
   }
   await sendMessage(to, fallbackText);
+}
+
+// Send a list, then — only when there's a next page — a Yes/No prompt using the
+// EXISTING confirm button template (CONFIRM_CONTENT_SID). Tapping Yes loads the
+// next page (handled in handleConfirmation). Falls back to "Reply Yes or No" text.
+async function sendListWithMore(to, response, hasMore, remaining) {
+  await sendMessage(to, response);
+  if (hasMore) await sendConfirm(to, `Show the next ${remaining}?`);
 }
 
 // Format a due date (+ optional time) for display, e.g. "Fri Jun 20 2026" or
@@ -776,7 +783,14 @@ async function handleConfirmation(senderNumber, member, message) {
     `SELECT * FROM pending_actions WHERE member_id = $1 AND status = 'pending' AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1`,
     [member.member_id],
   );
-  if (result.rows.length === 0) return false;
+  if (result.rows.length === 0) {
+    // No pending confirm — but if a list is paginated, Yes/No drives "more".
+    if (member.last_list) {
+      if (confirmed) { await handleMore(senderNumber, member); return true; }
+      if (denied) { await clearLastList(member.member_id); await sendMessage(senderNumber, "Okay 👍"); return true; }
+    }
+    return false;
+  }
   const action = result.rows[0];
 
   if (denied) {
@@ -946,13 +960,10 @@ async function renderTaskPage(senderNumber, member, kind, offset, extra) {
     const prefix = spec.overdue ? "⚠️ " : "";
     response += `${prefix}${task.task_id} | ${task.title} | ${task.assignee_name || "Unassigned"} | Due: ${formatDue(task.due_date, task.due_time)}\n`;
   }
-  if (end < total) {
-    response += `\n👉 Reply *more* for the next ${Math.min(PAGE_SIZE, total - end)}.`;
-    await setLastList(member.member_id, { type: "tasks", kind, offset: end, extra: extra || null });
-  } else {
-    await clearLastList(member.member_id);
-  }
-  await sendMessage(senderNumber, response);
+  const hasMore = end < total;
+  if (hasMore) await setLastList(member.member_id, { type: "tasks", kind, offset: end, extra: extra || null });
+  else await clearLastList(member.member_id);
+  await sendListWithMore(senderNumber, response, hasMore, Math.min(PAGE_SIZE, total - end));
 }
 
 async function handleMyTasks(senderNumber, member) {
@@ -990,13 +1001,10 @@ async function renderMembersPage(senderNumber, member, offset) {
   const start = off + 1, end = off + rows.length;
   let response = `*${member.org_name} users (${total})*` + (total > PAGE_SIZE ? ` — showing ${start}-${end}` : "") + `:\n\n`;
   rows.forEach((m, i) => { response += `${off + i + 1}. ${m.name} — ${m.role} — ${m.open_task_count} open tasks\n`; });
-  if (end < total) {
-    response += `\n👉 Reply *more* for the next ${Math.min(PAGE_SIZE, total - end)}.`;
-    await setLastList(member.member_id, { type: "members", offset: end });
-  } else {
-    await clearLastList(member.member_id);
-  }
-  await sendMessage(senderNumber, response);
+  const hasMore = end < total;
+  if (hasMore) await setLastList(member.member_id, { type: "members", offset: end });
+  else await clearLastList(member.member_id);
+  await sendListWithMore(senderNumber, response, hasMore, Math.min(PAGE_SIZE, total - end));
 }
 async function handleListMembers(senderNumber, member) {
   try { await renderMembersPage(senderNumber, member, 0); }
