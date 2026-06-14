@@ -87,6 +87,35 @@ function formatDue(dueDate, dueTime) {
   return `${d}, ${h}:${m} ${ampm}`;
 }
 
+// Notify an assignee about a task. Uses the approved task_assigned template
+// (TASK_ASSIGNED_CONTENT_SID) so it reaches people outside the 24h window;
+// falls back to free-form text when the SID isn't set. The template uses NAMED
+// variables, so contentVariables keys must match exactly.
+async function sendTaskAssigned(to, assigneeName, ownerName, taskId, title, dueText) {
+  const sid = process.env.TASK_ASSIGNED_CONTENT_SID;
+  if (sid) {
+    try {
+      await client.messages.create({
+        from: BOT_NUMBER,
+        to,
+        contentSid: sid,
+        contentVariables: JSON.stringify({
+          user_name: assigneeName,
+          task_owner: ownerName,
+          task_id: taskId,
+          task_description: title,
+          due_date: dueText,
+        }),
+      });
+      console.log("✅ task_assigned template sent to:", to);
+      return;
+    } catch (error) {
+      console.log("task_assigned template failed, using text:", error.message);
+    }
+  }
+  await sendMessage(to, `📋 New task assigned by ${ownerName}:\n${taskId} — ${title}\n📅 Due: ${dueText}`);
+}
+
 // ─────────────────────────────────────────
 // CONVERSATION STATE — short-term memory of "what am I waiting for"
 // ─────────────────────────────────────────
@@ -525,7 +554,7 @@ async function createTaskWithAssignee(senderNumber, member, opts) {
     // Non-blocking: remember last task; don't make the user wait on it.
     setLastTask(member.member_id, taskId);
     if (opts.assigneeId !== member.member_id && opts.assigneeNumber) {
-      await sendMessage(opts.assigneeNumber, `📋 New task assigned by ${member.name}:\n${taskId} — ${opts.title}${opts.due_date ? `\n📅 Due: ${dueTxt}` : ""}`);
+      await sendTaskAssigned(opts.assigneeNumber, opts.assigneeName, member.name, taskId, opts.title, dueTxt);
     }
   } catch (error) {
     console.log("Error creating task:", error.message);
@@ -651,7 +680,7 @@ async function handleUpdateTask(senderNumber, member, ai) {
 async function applyReassign(senderNumber, member, task, na) {
   await pool.query(`UPDATE tasks SET assignee_id = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [na.member_id, task.task_id, member.org_id]);
   await sendMessage(senderNumber, `Done ✅ ${task.task_id} assigned to ${na.name}.`);
-  if (na.whatsapp_number) await sendMessage(na.whatsapp_number, `📋 New task assigned by ${member.name}:\n${task.task_id} — ${task.title}`);
+  if (na.whatsapp_number) await sendTaskAssigned(na.whatsapp_number, na.name, member.name, task.task_id, task.title, formatDue(task.due_date, task.due_time));
   if (task.assignee_id && task.assignee_id !== na.member_id && task.assignee_number) {
     await sendMessage(task.assignee_number, `${task.task_id} — ${task.title} has been reassigned to ${na.name}.`);
   }
