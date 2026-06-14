@@ -149,6 +149,24 @@ router.post("/members", getOrg, async (req, res) => {
   }
 });
 
+// ── RENAME MEMBER (CR-1: update name only; phone number is not editable) ──
+router.patch("/members/:memberId", getOrg, async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || !name.trim())
+      return res.status(400).json({ error: "Name required" });
+    const r = await pool.query(
+      `UPDATE members SET name = $1, updated_at = NOW()
+       WHERE member_id = $2 AND org_id = $3 RETURNING member_id`,
+      [name.trim(), req.params.memberId, req.org.org_id],
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: "Member not found" });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── REMOVE MEMBER ──
 // PRD: Section 7.2
 router.delete("/members/:memberId", getOrg, async (req, res) => {
