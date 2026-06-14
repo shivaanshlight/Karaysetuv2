@@ -288,6 +288,11 @@ async function handleMessage(incomingMessage, senderNumber) {
     await sendMessage(senderNumber, "Sure! What's the task? Just type it below — for example:\n*Call the supplier by Friday*");
     return;
   }
+  // "more" / "next" — continue the previous list from where it left off.
+  if (/^(more|next|show more|see more|next page|more tasks)$/i.test(lower)) {
+    await handleMore(senderNumber, member);
+    return;
+  }
 
   // ── Fast-path: unambiguous, parameter-free commands skip the AI for speed.
   // Only when there's NO pending question, so we never hijack a multi-turn reply.
@@ -464,7 +469,8 @@ async function handleHelp(senderNumber, member) {
   t += `• List tasks\n• Delegated tasks\n• Overdue tasks\n`;
   t += `• Add task [description]\n• Update [task] [new description]\n`;
   t += `• Complete [task name or id]\n• Delete [task id]\n`;
-  t += `• Assign task [task] to [user]\n• Remove assignment [task]\n\n`;
+  t += `• Assign task [task] to [user]\n• Remove assignment [task]\n`;
+  t += `_Long lists show 5 at a time — reply *more* for the next page._\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
     t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n`;
@@ -888,106 +894,125 @@ async function handleUpdateMemberName(senderNumber, member, ai) {
 }
 
 // ─────────────────────────────────────────
-// LISTS
+// LISTS (paginated — 5 per page; reply "more" for the next page)
 // ─────────────────────────────────────────
-async function handleMyTasks(senderNumber, member) {
-  try {
-    const result = await pool.query(
-      `SELECT t.*, asn.name as assignee_name FROM tasks t LEFT JOIN members asn ON t.assignee_id = asn.member_id
-       WHERE t.owner_id = $1 AND t.status NOT IN ('completed', 'deleted') ORDER BY t.due_date ASC NULLS LAST LIMIT 5`,
-      [member.member_id],
-    );
-    if (result.rows.length === 0) { await sendMessage(senderNumber, `${member.name}, you own no open tasks 🎉`); return; }
-    const today = todayInTimezone(member.timezone);
-    let response = `*Your tasks (${result.rows.length}):*\n\n`;
-    for (const task of result.rows) {
-      const due = formatDue(task.due_date, task.due_time);
-      const overdue = task.due_date && toYMD(task.due_date) < today ? "⚠️ Overdue" : "● Open";
-      response += `${task.task_id} | ${task.title} | ${task.assignee_name || "Unassigned"} | Due: ${due} | ${overdue}\n`;
-    }
-    await sendMessage(senderNumber, response);
-  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+const PAGE_SIZE = 5;
+
+async function setLastList(memberId, spec) {
+  try { await pool.query(`UPDATE members SET last_list = $1 WHERE member_id = $2`, [JSON.stringify(spec), memberId]); } catch (e) { /* ignore */ }
 }
-async function handleDelegatedTasks(senderNumber, member) {
-  try {
-    const result = await pool.query(
-      `SELECT t.*, m.name as assignee_name FROM tasks t LEFT JOIN members m ON t.assignee_id = m.member_id
-       WHERE t.owner_id = $1 AND t.assignee_id IS NOT NULL AND t.assignee_id != $1 AND t.status NOT IN ('completed', 'deleted')
-       ORDER BY t.due_date ASC NULLS LAST LIMIT 5`,
-      [member.member_id],
-    );
-    if (result.rows.length === 0) { await sendMessage(senderNumber, `You haven't delegated any open tasks.`); return; }
-    let response = `*Delegated tasks (${result.rows.length}):*\n\n`;
-    for (const task of result.rows) {
-      const due = formatDue(task.due_date, task.due_time);
-      response += `${task.task_id} | ${task.title} | ${task.assignee_name} | Due: ${due}\n`;
-    }
-    await sendMessage(senderNumber, response);
-  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+async function clearLastList(memberId) {
+  try { await pool.query(`UPDATE members SET last_list = NULL WHERE member_id = $1`, [memberId]); } catch (e) { /* ignore */ }
 }
-async function handleAllTasks(senderNumber, member) {
-  try {
-    const result = await pool.query(
-      `SELECT t.*, m.name as assignee_name FROM tasks t LEFT JOIN members m ON t.assignee_id = m.member_id
-       WHERE t.org_id = $1 AND t.status NOT IN ('completed', 'deleted') ORDER BY t.due_date ASC NULLS LAST LIMIT 5`,
-      [member.org_id],
-    );
-    if (result.rows.length === 0) { await sendMessage(senderNumber, `No open tasks in ${member.org_name}.`); return; }
-    let response = `*All open tasks in ${member.org_name} (${result.rows.length}):*\n\n`;
-    for (const task of result.rows) {
-      const due = formatDue(task.due_date, task.due_time);
-      response += `${task.task_id} | ${task.title} | ${task.assignee_name || "Unassigned"} | Due: ${due}\n`;
-    }
-    await sendMessage(senderNumber, response);
-  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+
+// Build the WHERE clause + params for a task-list kind.
+function taskListSpec(kind, member, extra) {
+  const today = todayInTimezone(member.timezone);
+  switch (kind) {
+    case "my_tasks":
+      return { where: `t.owner_id = $1 AND t.status NOT IN ('completed','deleted')`, params: [member.member_id], order: `t.due_date ASC NULLS LAST`, header: "Your tasks", empty: `${member.name}, you own no open tasks 🎉` };
+    case "delegated":
+      return { where: `t.owner_id = $1 AND t.assignee_id IS NOT NULL AND t.assignee_id != $1 AND t.status NOT IN ('completed','deleted')`, params: [member.member_id], order: `t.due_date ASC NULLS LAST`, header: "Delegated tasks", empty: `You haven't delegated any open tasks.` };
+    case "all_tasks":
+      return { where: `t.org_id = $1 AND t.status NOT IN ('completed','deleted')`, params: [member.org_id], order: `t.due_date ASC NULLS LAST`, header: `All open tasks in ${member.org_name}`, empty: `No open tasks in ${member.org_name}.` };
+    case "overdue":
+      return member.role === "organizer"
+        ? { where: `t.org_id = $1 AND t.due_date < $2 AND t.status NOT IN ('completed','deleted')`, params: [member.org_id, today], order: `t.due_date ASC`, header: "Overdue tasks", empty: `No overdue tasks. Great work! 🎉`, overdue: true }
+        : { where: `t.owner_id = $1 AND t.due_date < $2 AND t.status NOT IN ('completed','deleted')`, params: [member.member_id, today], order: `t.due_date ASC`, header: "Overdue tasks", empty: `No overdue tasks. Great work! 🎉`, overdue: true };
+    case "assigned_to":
+      return { where: `t.assignee_id = $1 AND t.status NOT IN ('completed','deleted')`, params: [extra.targetId], order: `t.due_date ASC NULLS LAST`, header: `Tasks assigned to ${extra.targetName}`, empty: `${extra.targetName} has no open tasks.` };
+    default:
+      return null;
+  }
 }
-async function handleOverdueTasks(senderNumber, member) {
-  try {
-    const today = todayInTimezone(member.timezone);
-    let query, params;
-    if (member.role === "organizer") {
-      query = `SELECT t.*, m.name as assignee_name FROM tasks t LEFT JOIN members m ON t.assignee_id = m.member_id
-               WHERE t.org_id = $1 AND t.due_date < $2 AND t.status NOT IN ('completed', 'deleted') ORDER BY t.due_date ASC LIMIT 5`;
-      params = [member.org_id, today];
-    } else {
-      query = `SELECT * FROM tasks WHERE owner_id = $1 AND due_date < $2 AND status NOT IN ('completed', 'deleted') ORDER BY due_date ASC LIMIT 5`;
-      params = [member.member_id, today];
-    }
-    const result = await pool.query(query, params);
-    if (result.rows.length === 0) { await sendMessage(senderNumber, `No overdue tasks. Great work! 🎉`); return; }
-    let response = `*Overdue tasks (${result.rows.length}):*\n\n`;
-    for (const task of result.rows) {
-      response += `⚠️ ${task.task_id} | ${task.title} | Due: ${formatDue(task.due_date, task.due_time)}\n`;
-    }
-    await sendMessage(senderNumber, response);
-  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
-}
-async function handleListMembers(senderNumber, member) {
-  try {
-    const result = await pool.query(
-      `SELECT m.*, COUNT(t.task_id) as open_task_count FROM members m
-       LEFT JOIN tasks t ON t.assignee_id = m.member_id AND t.status NOT IN ('completed', 'deleted')
-       WHERE m.org_id = $1 AND m.status = 'active' GROUP BY m.member_id ORDER BY m.created_at ASC`,
-      [member.org_id],
-    );
-    let response = `*${member.org_name} users (${result.rows.length}):*\n\n`;
-    result.rows.forEach((m, i) => { response += `${i + 1}. ${m.name} — ${m.role} — ${m.open_task_count} open tasks\n`; });
-    await sendMessage(senderNumber, response);
-  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
-}
-async function listTasksFor(senderNumber, member, target) {
-  const result = await pool.query(
-    `SELECT * FROM tasks WHERE assignee_id = $1 AND status NOT IN ('completed', 'deleted') ORDER BY due_date ASC NULLS LAST LIMIT 5`,
-    [target.member_id],
+
+// Render one page of a task list and remember the cursor so "more" continues it.
+async function renderTaskPage(senderNumber, member, kind, offset, extra) {
+  const spec = taskListSpec(kind, member, extra);
+  if (!spec) return;
+  const off = Math.max(0, parseInt(offset, 10) || 0);
+  const countRes = await pool.query(`SELECT COUNT(*) FROM tasks t WHERE ${spec.where}`, spec.params);
+  const total = parseInt(countRes.rows[0].count, 10);
+  if (total === 0) { await clearLastList(member.member_id); await sendMessage(senderNumber, spec.empty); return; }
+  const rowsRes = await pool.query(
+    `SELECT t.*, asn.name as assignee_name FROM tasks t LEFT JOIN members asn ON t.assignee_id = asn.member_id
+     WHERE ${spec.where} ORDER BY ${spec.order} LIMIT ${PAGE_SIZE} OFFSET ${off}`,
+    spec.params,
   );
-  if (result.rows.length === 0) { await sendMessage(senderNumber, `${target.name} has no open tasks.`); return; }
-  let response = `*Tasks assigned to ${target.name} (${result.rows.length}):*\n\n`;
-  for (const task of result.rows) {
-    const due = formatDue(task.due_date, task.due_time);
-    response += `${task.task_id} | ${task.title} | Due: ${due}\n`;
+  const rows = rowsRes.rows;
+  const start = off + 1, end = off + rows.length;
+  let response = `*${spec.header} (${total})*` + (total > PAGE_SIZE ? ` — showing ${start}-${end}` : "") + `:\n\n`;
+  for (const task of rows) {
+    const prefix = spec.overdue ? "⚠️ " : "";
+    response += `${prefix}${task.task_id} | ${task.title} | ${task.assignee_name || "Unassigned"} | Due: ${formatDue(task.due_date, task.due_time)}\n`;
+  }
+  if (end < total) {
+    response += `\n👉 Reply *more* for the next ${Math.min(PAGE_SIZE, total - end)}.`;
+    await setLastList(member.member_id, { type: "tasks", kind, offset: end, extra: extra || null });
+  } else {
+    await clearLastList(member.member_id);
   }
   await sendMessage(senderNumber, response);
 }
+
+async function handleMyTasks(senderNumber, member) {
+  try { await renderTaskPage(senderNumber, member, "my_tasks", 0); }
+  catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+async function handleDelegatedTasks(senderNumber, member) {
+  try { await renderTaskPage(senderNumber, member, "delegated", 0); }
+  catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+async function handleAllTasks(senderNumber, member) {
+  try { await renderTaskPage(senderNumber, member, "all_tasks", 0); }
+  catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+async function handleOverdueTasks(senderNumber, member) {
+  try { await renderTaskPage(senderNumber, member, "overdue", 0); }
+  catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+async function listTasksFor(senderNumber, member, target) {
+  await renderTaskPage(senderNumber, member, "assigned_to", 0, { targetId: target.member_id, targetName: target.name });
+}
+
+// Members list (also paginated).
+async function renderMembersPage(senderNumber, member, offset) {
+  const off = Math.max(0, parseInt(offset, 10) || 0);
+  const countRes = await pool.query(`SELECT COUNT(*) FROM members WHERE org_id = $1 AND status = 'active'`, [member.org_id]);
+  const total = parseInt(countRes.rows[0].count, 10);
+  const result = await pool.query(
+    `SELECT m.*, COUNT(t.task_id) as open_task_count FROM members m
+     LEFT JOIN tasks t ON t.assignee_id = m.member_id AND t.status NOT IN ('completed', 'deleted')
+     WHERE m.org_id = $1 AND m.status = 'active' GROUP BY m.member_id ORDER BY m.created_at ASC LIMIT ${PAGE_SIZE} OFFSET ${off}`,
+    [member.org_id],
+  );
+  const rows = result.rows;
+  const start = off + 1, end = off + rows.length;
+  let response = `*${member.org_name} users (${total})*` + (total > PAGE_SIZE ? ` — showing ${start}-${end}` : "") + `:\n\n`;
+  rows.forEach((m, i) => { response += `${off + i + 1}. ${m.name} — ${m.role} — ${m.open_task_count} open tasks\n`; });
+  if (end < total) {
+    response += `\n👉 Reply *more* for the next ${Math.min(PAGE_SIZE, total - end)}.`;
+    await setLastList(member.member_id, { type: "members", offset: end });
+  } else {
+    await clearLastList(member.member_id);
+  }
+  await sendMessage(senderNumber, response);
+}
+async function handleListMembers(senderNumber, member) {
+  try { await renderMembersPage(senderNumber, member, 0); }
+  catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+
+// "more" — continue the last list from where it left off.
+async function handleMore(senderNumber, member) {
+  const spec = member.last_list;
+  if (!spec) { await sendMessage(senderNumber, "There's nothing more to show. Send a list first, e.g. *my tasks*."); return; }
+  try {
+    if (spec.type === "members") return renderMembersPage(senderNumber, member, spec.offset);
+    return renderTaskPage(senderNumber, member, spec.kind, spec.offset, spec.extra || undefined);
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+
 async function handleTasksAssignedTo(senderNumber, member, ai) {
   try {
     const targetName = ai.member_name || ai.assignee_name;
