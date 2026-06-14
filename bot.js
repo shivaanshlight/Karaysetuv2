@@ -64,6 +64,21 @@ async function sendWithButtons(to, contentSid, vars, fallbackText) {
   await sendMessage(to, fallbackText);
 }
 
+// Format a due date (+ optional time) for display, e.g. "Fri Jun 20 2026" or
+// "Fri Jun 20 2026, 5:00 PM". due_time is a "HH:MM" 24-hour string or null.
+function formatDue(dueDate, dueTime) {
+  if (!dueDate) return "No due date";
+  const d = new Date(dueDate).toDateString();
+  if (!dueTime) return d;
+  const [hStr, mStr] = String(dueTime).split(":");
+  let h = parseInt(hStr, 10);
+  if (isNaN(h)) return d;
+  const m = (mStr || "00").padStart(2, "0");
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = ((h + 11) % 12) + 1;
+  return `${d}, ${h}:${m} ${ampm}`;
+}
+
 // ─────────────────────────────────────────
 // CONVERSATION STATE — short-term memory of "what am I waiting for"
 // ─────────────────────────────────────────
@@ -336,6 +351,9 @@ async function dispatch(senderNumber, member, ai) {
     case "remove_member":
       if (member.role !== "organizer") return sendMessage(senderNumber, "Sorry, only the Organizer can remove users.");
       return handleRemoveMember(senderNumber, member, ai);
+    case "update_member_name":
+      if (member.role !== "organizer") return sendMessage(senderNumber, "Sorry, only the Organizer can rename users.");
+      return handleUpdateMemberName(senderNumber, member, ai);
     default:
       return sendMessage(senderNumber, `Hi ${member.name}! I didn't understand that.\n\nSend *Help* to see all available commands.`);
   }
@@ -373,8 +391,14 @@ async function tryResume(senderNumber, member, convo, message, ai) {
     await clearConvoState(member.member_id);
     await dispatch(senderNumber, member, {
       intent: "update_task", task_reference: convo.task_reference,
-      due_date: ai.due_date || null, priority: ai.priority || null, task_title: ai.task_title || null,
+      due_date: ai.due_date || null, due_time: ai.due_time || null, priority: ai.priority || null, task_title: ai.task_title || null,
     });
+    return true;
+  }
+  if (convo.awaiting === "new_name") {
+    const newName = ai.new_name || message.trim();
+    await clearConvoState(member.member_id);
+    await applyRename(senderNumber, member, convo.target, newName);
     return true;
   }
   if (convo.awaiting === "title") {
@@ -384,6 +408,7 @@ async function tryResume(senderNumber, member, convo, message, ai) {
       intent: "create_task", task_title: title,
       assignee_name: convo.partial ? convo.partial.assignee_name : null,
       due_date: convo.partial ? convo.partial.due_date : null,
+      due_time: convo.partial ? convo.partial.due_time : null,
       priority: convo.partial ? convo.partial.priority : null,
     });
     return true;
@@ -396,9 +421,12 @@ async function resumeChoice(senderNumber, member, convo, chosen) {
   if (convo.purpose === "create_assignee") {
     const ctx = convo.context || {};
     return createTaskWithAssignee(senderNumber, member, {
-      title: ctx.title, due_date: ctx.due_date, priority: ctx.priority,
+      title: ctx.title, due_date: ctx.due_date, due_time: ctx.due_time, priority: ctx.priority,
       assigneeId: chosen.member_id, assigneeName: chosen.name, assigneeNumber: chosen.whatsapp_number,
     });
+  }
+  if (convo.purpose === "rename") {
+    return applyRename(senderNumber, member, chosen, convo.context.new_name);
   }
   if (convo.purpose === "reassign") {
     const task = await findTaskByReference(member.org_id, convo.context.task_id);
@@ -439,7 +467,7 @@ async function handleHelp(senderNumber, member) {
   t += `• Assign task [task] to [user]\n• Remove assignment [task]\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
-    t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n`;
+    t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n`;
   }
   // Template variables can't contain newlines, so pass a single-line summary
   // for the buttons template; the full multi-line text is the fallback.
@@ -466,14 +494,14 @@ async function createTaskWithAssignee(senderNumber, member, opts) {
          UPDATE organizations SET task_counter = task_counter + 1
          WHERE org_id = $1 RETURNING task_counter
        )
-       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, priority)
-       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4, $5, $6
+       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, due_time, priority)
+       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4, $5, $6, $7
        FROM bumped
        RETURNING task_id`,
-      [member.org_id, opts.title, member.member_id, opts.assigneeId, opts.due_date || null, opts.priority || "normal"],
+      [member.org_id, opts.title, member.member_id, opts.assigneeId, opts.due_date || null, opts.due_time || null, opts.priority || "normal"],
     );
     const taskId = r.rows[0].task_id;
-    const dueTxt = opts.due_date ? new Date(opts.due_date).toDateString() : "No due date";
+    const dueTxt = formatDue(opts.due_date, opts.due_time);
     await sendMessage(senderNumber, `Added ✅ ${taskId}\n📋 ${opts.title}\n👤 Assigned to: ${opts.assigneeName}\n📅 Due: ${dueTxt}`);
     // Non-blocking: remember last task; don't make the user wait on it.
     setLastTask(member.member_id, taskId);
@@ -496,7 +524,7 @@ async function handleCreateTask(senderNumber, member, ai) {
     if (!ai.task_title) {
       await setConvoState(member.member_id, {
         awaiting: "title",
-        partial: { assignee_name: ai.assignee_name || null, due_date: ai.due_date || null, priority: ai.priority || null },
+        partial: { assignee_name: ai.assignee_name || null, due_date: ai.due_date || null, due_time: ai.due_time || null, priority: ai.priority || null },
       });
       await sendMessage(senderNumber, "What should I call this task?");
       return;
@@ -505,16 +533,16 @@ async function handleCreateTask(senderNumber, member, ai) {
       const matches = await resolveMembers(ai.assignee_name, ai.phone_number, member.org_id);
       if (matches.length === 0) {
         await sendMessage(senderNumber, `${ai.assignee_name || ai.phone_number} is not a user of ${member.org_name}. Assigning to you instead.`);
-        return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
+        return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
       }
       if (matches.length > 1) {
-        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: ai.task_title, due_date: ai.due_date, priority: ai.priority || "normal" } });
+        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal" } });
         await sendMessage(senderNumber, choiceMenu(ai.assignee_name, matches));
         return;
       }
-      return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
+      return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
     }
-    return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
+    return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
   } catch (error) {
     console.log("Error:", error.message);
     await sendMessage(senderNumber, "Something went wrong. Please try again.");
@@ -581,15 +609,18 @@ async function handleUpdateTask(senderNumber, member, ai) {
     }
     const newTitle = ai.task_title && ai.task_title.toLowerCase() !== String(task.task_id).toLowerCase() ? ai.task_title : null;
     const newDue = ai.due_date || null;
+    const newTime = ai.due_time || null;
     const newPriority = ["high", "normal", "low"].includes(ai.priority) ? ai.priority : null;
-    if (!newTitle && !newDue && !newPriority) {
+    if (!newTitle && !newDue && !newTime && !newPriority) {
       // Wait for the change and connect their next message to this task.
       await setConvoState(member.member_id, { awaiting: "update_fields", task_reference: task.task_id });
-      await sendMessage(senderNumber, `What should I change on ${task.task_id}? You can update the description, due date, or priority.`); return;
+      await sendMessage(senderNumber, `What should I change on ${task.task_id}? You can update the description, due date/time, or priority.`); return;
     }
     const parts = [];
     if (newTitle) { await pool.query(`UPDATE tasks SET title = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newTitle, task.task_id, member.org_id]); parts.push(`description → "${newTitle}"`); }
-    if (newDue) { await pool.query(`UPDATE tasks SET due_date = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newDue, task.task_id, member.org_id]); parts.push(`due date → ${new Date(newDue).toDateString()}`); }
+    if (newDue) { await pool.query(`UPDATE tasks SET due_date = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newDue, task.task_id, member.org_id]); }
+    if (newTime) { await pool.query(`UPDATE tasks SET due_time = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newTime, task.task_id, member.org_id]); }
+    if (newDue || newTime) { parts.push(`due → ${formatDue(newDue || task.due_date, newTime || task.due_time)}`); }
     if (newPriority) { await pool.query(`UPDATE tasks SET priority = $1, updated_at = NOW() WHERE task_id = $2 AND org_id = $3`, [newPriority, task.task_id, member.org_id]); parts.push(`priority → ${newPriority}`); }
     await sendMessage(senderNumber, `Updated ✅ ${task.task_id} — ${parts.join(", ")}.`);
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
@@ -825,6 +856,38 @@ async function executeRemoveMember(senderNumber, member, action) {
 }
 
 // ─────────────────────────────────────────
+// RENAME MEMBER (CR-1: change a user's name; phone number stays fixed)
+// ─────────────────────────────────────────
+async function applyRename(senderNumber, member, target, newName) {
+  if (!newName || !newName.trim()) { await sendMessage(senderNumber, "Please tell me the new name. Example: Rename Priya to Priya Sharma"); return; }
+  const clean = newName.trim();
+  const oldName = target.name;
+  await pool.query(`UPDATE members SET name = $1, updated_at = NOW() WHERE member_id = $2 AND org_id = $3`, [clean, target.member_id, member.org_id]);
+  await sendMessage(senderNumber, `Done ✅ ${oldName} is now named ${clean}.`);
+}
+async function handleUpdateMemberName(senderNumber, member, ai) {
+  try {
+    if (!ai.member_name && !ai.phone_number) {
+      await sendMessage(senderNumber, "Who do you want to rename? Example: Rename Priya to Priya Sharma"); return;
+    }
+    const matches = await resolveMembers(ai.member_name, ai.phone_number, member.org_id);
+    if (matches.length === 0) { await sendMessage(senderNumber, `${ai.member_name || ai.phone_number} is not a user of ${member.org_name}.`); return; }
+    if (matches.length > 1) {
+      // Ambiguous current name — ask which one, remembering the new name.
+      await setConvoState(member.member_id, { awaiting: "choice", purpose: "rename", options: optionList(matches), context: { new_name: ai.new_name || null } });
+      await sendMessage(senderNumber, choiceMenu(ai.member_name, matches));
+      return;
+    }
+    if (!ai.new_name) {
+      await setConvoState(member.member_id, { awaiting: "new_name", target: { member_id: matches[0].member_id, name: matches[0].name } });
+      await sendMessage(senderNumber, `What should ${matches[0].name}'s new name be?`);
+      return;
+    }
+    return applyRename(senderNumber, member, matches[0], ai.new_name);
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+
+// ─────────────────────────────────────────
 // LISTS
 // ─────────────────────────────────────────
 async function handleMyTasks(senderNumber, member) {
@@ -838,7 +901,7 @@ async function handleMyTasks(senderNumber, member) {
     const today = todayInTimezone(member.timezone);
     let response = `*Your tasks (${result.rows.length}):*\n\n`;
     for (const task of result.rows) {
-      const due = task.due_date ? new Date(task.due_date).toDateString() : "No due date";
+      const due = formatDue(task.due_date, task.due_time);
       const overdue = task.due_date && toYMD(task.due_date) < today ? "⚠️ Overdue" : "● Open";
       response += `${task.task_id} | ${task.title} | ${task.assignee_name || "Unassigned"} | Due: ${due} | ${overdue}\n`;
     }
@@ -856,7 +919,7 @@ async function handleDelegatedTasks(senderNumber, member) {
     if (result.rows.length === 0) { await sendMessage(senderNumber, `You haven't delegated any open tasks.`); return; }
     let response = `*Delegated tasks (${result.rows.length}):*\n\n`;
     for (const task of result.rows) {
-      const due = task.due_date ? new Date(task.due_date).toDateString() : "No due date";
+      const due = formatDue(task.due_date, task.due_time);
       response += `${task.task_id} | ${task.title} | ${task.assignee_name} | Due: ${due}\n`;
     }
     await sendMessage(senderNumber, response);
@@ -872,7 +935,7 @@ async function handleAllTasks(senderNumber, member) {
     if (result.rows.length === 0) { await sendMessage(senderNumber, `No open tasks in ${member.org_name}.`); return; }
     let response = `*All open tasks in ${member.org_name} (${result.rows.length}):*\n\n`;
     for (const task of result.rows) {
-      const due = task.due_date ? new Date(task.due_date).toDateString() : "No due date";
+      const due = formatDue(task.due_date, task.due_time);
       response += `${task.task_id} | ${task.title} | ${task.assignee_name || "Unassigned"} | Due: ${due}\n`;
     }
     await sendMessage(senderNumber, response);
@@ -894,7 +957,7 @@ async function handleOverdueTasks(senderNumber, member) {
     if (result.rows.length === 0) { await sendMessage(senderNumber, `No overdue tasks. Great work! 🎉`); return; }
     let response = `*Overdue tasks (${result.rows.length}):*\n\n`;
     for (const task of result.rows) {
-      response += `⚠️ ${task.task_id} | ${task.title} | Due: ${new Date(task.due_date).toDateString()}\n`;
+      response += `⚠️ ${task.task_id} | ${task.title} | Due: ${formatDue(task.due_date, task.due_time)}\n`;
     }
     await sendMessage(senderNumber, response);
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
@@ -920,7 +983,7 @@ async function listTasksFor(senderNumber, member, target) {
   if (result.rows.length === 0) { await sendMessage(senderNumber, `${target.name} has no open tasks.`); return; }
   let response = `*Tasks assigned to ${target.name} (${result.rows.length}):*\n\n`;
   for (const task of result.rows) {
-    const due = task.due_date ? new Date(task.due_date).toDateString() : "No due date";
+    const due = formatDue(task.due_date, task.due_time);
     response += `${task.task_id} | ${task.title} | Due: ${due}\n`;
   }
   await sendMessage(senderNumber, response);
