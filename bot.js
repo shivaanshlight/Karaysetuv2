@@ -512,7 +512,7 @@ async function handleHelp(senderNumber, member) {
   t += `• Add task [description]\n• Update [task] [new description]\n`;
   t += `• Complete [task name or id]\n• Delete [task id]\n`;
   t += `• Assign task [task] to [user]\n• Remove assignment [task]\n`;
-  t += `_Long lists show 5 at a time — reply *more* for next, *back* for previous._\n\n`;
+  t += `_Long lists show 20 at a time — reply *more* for next, *back* for previous._\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
     t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n`;
@@ -943,9 +943,9 @@ async function handleUpdateMemberName(senderNumber, member, ai) {
 }
 
 // ─────────────────────────────────────────
-// LISTS (paginated — 5 per page; reply "more" for the next page)
+// LISTS (paginated — 20 per page; reply "more"/"back" to navigate)
 // ─────────────────────────────────────────
-const PAGE_SIZE = 5;
+const PAGE_SIZE = 20;
 
 async function setLastList(memberId, spec) {
   try { await pool.query(`UPDATE members SET last_list = $1 WHERE member_id = $2`, [JSON.stringify(spec), memberId]); } catch (e) { /* ignore */ }
