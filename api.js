@@ -219,86 +219,84 @@ router.patch("/settings", getOrg, async (req, res) => {
   }
 });
 const { createToken } = require("./auth");
-const { Resend } = require("resend");
 
-// Lazily create the Resend client so the app can still boot (and the WhatsApp
-// bot can run) before email/OTP is configured. Only the OTP login needs it.
-let _resend = null;
-function getResend() {
-  if (!process.env.RESEND_API_KEY) {
-    throw new Error(
-      "Email login is not configured yet (RESEND_API_KEY is missing).",
-    );
-  }
-  if (!_resend) _resend = new Resend(process.env.RESEND_API_KEY);
-  return _resend;
-}
-
-const OTP_FROM = process.env.RESEND_FROM || "KaryaSetu <noreply@yourdomain.com>";
 const MAX_OTP_ATTEMPTS = 5;
 const RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute between sends
 
-// Store OTPs temporarily.
-// NOTE: in-memory — fine for a single instance, but OTPs are lost on restart
-// and not shared across instances. Move to Redis/DB for multi-instance deploys.
+// Store OTPs temporarily, keyed by the organizer's WhatsApp number.
+// NOTE: in-memory — fine for a single instance, but OTPs are lost on restart.
+// Move to Redis/DB for multi-instance deploys.
 const otpStore = {};
 
-// SEND OTP
+// Deliver the OTP over SMS using Fast2SMS (India). Uses their ready-made "otp"
+// route — no Twilio number, no DLT setup. You only need a FAST2SMS_API_KEY.
+async function sendOtpSMS(toPlain, otp) {
+  const apiKey = process.env.FAST2SMS_API_KEY;
+  if (!apiKey) {
+    throw new Error("SMS login is not configured (FAST2SMS_API_KEY is missing).");
+  }
+  // Fast2SMS wants a 10-digit Indian number (no country code / +91).
+  const number = String(toPlain).replace(/\D/g, "").slice(-10);
+  const resp = await fetch("https://www.fast2sms.com/dev/bulkV2", {
+    method: "POST",
+    headers: { authorization: apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ route: "otp", variables_values: otp, numbers: number }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!data.return) {
+    throw new Error(data.message || "Could not send the SMS code. Please try again.");
+  }
+}
+
+// SEND OTP — to the organizer's registered WhatsApp number
 router.post("/auth/send-otp", async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: "Email required" });
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: "Phone number required" });
 
-    // Throttle resends to slow down abuse / email flooding.
-    const prev = otpStore[email];
+    const formatted = formatWhatsAppNumber(phone);
+    if (!formatted) {
+      return res.status(400).json({ error: "Please enter a valid phone number" });
+    }
+
+    // Throttle resends to slow down abuse.
+    const prev = otpStore[formatted];
     if (prev && Date.now() - prev.sentAt < RESEND_COOLDOWN_MS) {
       return res
         .status(429)
-        .json({ error: "Please wait a minute before requesting another OTP" });
+        .json({ error: "Please wait a minute before requesting another code" });
     }
 
-    // Check if this email belongs to an organizer
+    // Must be an active organizer of some org.
     const member = await pool.query(
       `SELECT m.*, o.org_name, o.org_id FROM members m
        JOIN organizations o ON m.org_id = o.org_id
-       WHERE m.email = $1 AND m.role = 'organizer' AND m.status = 'active'`,
-      [email],
+       WHERE m.whatsapp_number = $1 AND m.role = 'organizer' AND m.status = 'active'
+         AND o.status = 'active'
+       ORDER BY m.created_at ASC LIMIT 1`,
+      [formatted],
     );
 
     if (member.rows.length === 0) {
       return res
         .status(404)
-        .json({ error: "No organizer found with this email" });
+        .json({ error: "You are not a registered organizer on KaryaSetu" });
     }
 
-    // Generate 6 digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-    // Store OTP
-    otpStore[email] = {
+    otpStore[formatted] = {
       otp,
-      expiresAt,
+      expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
       orgId: member.rows[0].org_id,
       memberId: member.rows[0].member_id,
       attempts: 0,
       sentAt: Date.now(),
     };
 
-    // Send email
-    await getResend().emails.send({
-      from: OTP_FROM,
-      to: email,
-      subject: "Your KaryaSetu login OTP",
-      html: `
-        <h2>KaryaSetu Organizer Panel</h2>
-        <p>Your OTP is: <strong style="font-size:24px">${otp}</strong></p>
-        <p>This OTP expires in 10 minutes.</p>
-        <p>If you didn't request this, ignore this email.</p>
-      `,
-    });
-
-    res.json({ success: true, message: "OTP sent" });
+    // Send as SMS to the plain E.164 number (strip the "whatsapp:" prefix).
+    const plain = formatted.replace("whatsapp:", "");
+    await sendOtpSMS(plain, otp);
+    res.json({ success: true, message: "Code sent by SMS" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -307,42 +305,33 @@ router.post("/auth/send-otp", async (req, res) => {
 // VERIFY OTP
 router.post("/auth/verify-otp", async (req, res) => {
   try {
-    const { email, otp } = req.body;
-    const stored = otpStore[email];
+    const { phone, otp } = req.body;
+    const formatted = formatWhatsAppNumber(phone || "");
+    const stored = formatted ? otpStore[formatted] : null;
 
     if (!stored)
-      return res
-        .status(400)
-        .json({ error: "OTP not found. Request a new one." });
+      return res.status(400).json({ error: "Code not found. Request a new one." });
     if (Date.now() > stored.expiresAt) {
-      delete otpStore[email];
-      return res.status(400).json({ error: "OTP expired. Request a new one." });
+      delete otpStore[formatted];
+      return res.status(400).json({ error: "Code expired. Request a new one." });
     }
-
-    // Limit guesses to defeat brute-forcing a 6-digit code.
     if (stored.attempts >= MAX_OTP_ATTEMPTS) {
-      delete otpStore[email];
-      return res
-        .status(429)
-        .json({ error: "Too many attempts. Request a new OTP." });
+      delete otpStore[formatted];
+      return res.status(429).json({ error: "Too many attempts. Request a new code." });
     }
-
     if (stored.otp !== otp) {
       stored.attempts += 1;
-      return res.status(400).json({ error: "Wrong OTP" });
+      return res.status(400).json({ error: "Wrong code" });
     }
 
-    // Clear OTP (single use)
-    delete otpStore[email];
+    delete otpStore[formatted]; // single use
 
-    // Get org and member details
     const member = await pool.query(
       `SELECT m.*, o.org_name FROM members m
        JOIN organizations o ON m.org_id = o.org_id
-       WHERE m.email = $1 AND m.role = 'organizer'`,
-      [email],
+       WHERE m.member_id = $1`,
+      [stored.memberId],
     );
-
     const m = member.rows[0];
     const token = createToken({ org_id: m.org_id, member_id: m.member_id });
     res.json({
