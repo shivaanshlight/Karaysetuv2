@@ -121,19 +121,19 @@
         <div class="login-sub">Organizer Web Panel — sign in to continue</div>
         <div id="step1">
           <div class="form-group">
-            <label class="form-label">Email address</label>
-            <input class="form-input" type="email" id="loginEmail" placeholder="you@company.com" />
+            <label class="form-label">Registered phone number</label>
+            <input class="form-input" type="tel" id="loginPhone" placeholder="+91 98765 43210" />
           </div>
-          <button class="login-btn" onclick="sendOTP()">Send OTP</button>
-          <div class="otp-note">We'll send a one-time password to your email</div>
+          <button class="login-btn" onclick="sendOTP()">Send code</button>
+          <div class="otp-note">We'll send a one-time code by SMS to your phone</div>
         </div>
         <div id="step2" style="display:none">
           <div class="form-group">
-            <label class="form-label">Enter OTP sent to your email</label>
-            <input class="form-input" type="text" id="otpInput" placeholder="Enter 6-digit OTP" maxlength="6" />
+            <label class="form-label">Enter the code sent to your phone</label>
+            <input class="form-input" type="text" id="otpInput" placeholder="Enter 6-digit code" maxlength="6" />
           </div>
           <button class="login-btn" onclick="verifyOTP()">Verify &amp; Login</button>
-          <div class="otp-note" style="cursor:pointer;color:var(--accent)" onclick="backToEmail()">← Use different email</div>
+          <div class="otp-note" style="cursor:pointer;color:var(--accent)" onclick="backToEmail()">← Use a different number</div>
         </div>
       </div>
     </div>
@@ -310,28 +310,28 @@
       }
 
       async function sendOTP() {
-        const email = document.getElementById("loginEmail").value.trim();
-        if (!email) { showToast("Please enter your email", "error"); return; }
+        const phone = document.getElementById("loginPhone").value.trim();
+        if (!phone) { showToast("Please enter your phone number", "error"); return; }
         try {
           const res = await fetch(`${API}/api/auth/send-otp`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }),
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone }),
           });
           const data = await res.json().catch(() => ({}));
           if (res.ok) {
             document.getElementById("step1").style.display = "none";
             document.getElementById("step2").style.display = "block";
-            showToast("OTP sent to " + email, "success");
-          } else { showToast(data.error || "Could not send OTP", "error"); }
+            showToast("Code sent by SMS", "success");
+          } else { showToast(data.error || "Could not send code", "error"); }
         } catch { showToast("Could not connect to server", "error"); }
       }
 
       async function verifyOTP() {
-        const email = document.getElementById("loginEmail").value.trim();
+        const phone = document.getElementById("loginPhone").value.trim();
         const otp = document.getElementById("otpInput").value.trim();
-        if (!otp) { showToast("Please enter the OTP", "error"); return; }
+        if (!otp) { showToast("Please enter the code", "error"); return; }
         try {
           const res = await fetch(`${API}/api/auth/verify-otp`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, otp }),
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone, otp }),
           });
           const data = await res.json().catch(() => ({}));
           if (res.ok) {
@@ -342,7 +342,7 @@
             localStorage.setItem("ks_org_name", state.orgName);
             localStorage.setItem("ks_user_name", state.userName);
             showApp(); loadData();
-          } else { showToast(data.error || "Wrong or expired OTP", "error"); }
+          } else { showToast(data.error || "Wrong or expired code", "error"); }
         } catch { showToast("Could not connect to server", "error"); }
       }
 
