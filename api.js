@@ -228,29 +228,24 @@ const RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute between sends
 // Move to Redis/DB for multi-instance deploys.
 const otpStore = {};
 
-// Deliver the OTP over SMS using Fast2SMS "Quick SMS" route — no DLT, no website
-// verification. Sends to non-DND numbers using your wallet credit. You only need
-// a FAST2SMS_API_KEY.
-async function sendOtpSMS(toPlain, otp) {
-  const apiKey = process.env.FAST2SMS_API_KEY;
-  if (!apiKey) {
-    throw new Error("SMS login is not configured (FAST2SMS_API_KEY is missing).");
-  }
-  // Fast2SMS wants a 10-digit Indian number (no country code / +91).
-  const number = String(toPlain).replace(/\D/g, "").slice(-10);
-  const resp = await fetch("https://www.fast2sms.com/dev/bulkV2", {
-    method: "POST",
-    headers: { authorization: apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      route: "q",
-      message: `Your KaryaSetu login code is ${otp}. It is valid for 10 minutes.`,
-      language: "english",
-      numbers: number,
-    }),
-  });
-  const data = await resp.json().catch(() => ({}));
-  if (!data.return) {
-    throw new Error(data.message || "Could not send the SMS code. Please try again.");
+// Deliver the OTP over WhatsApp. Uses an approved Authentication template
+// (OTP_CONTENT_SID) when set — needed to reach an organizer who hasn't messaged
+// the bot in the last 24h — otherwise sends plain text.
+async function sendOtpWhatsApp(to, otp) {
+  const sid = process.env.OTP_CONTENT_SID;
+  if (sid) {
+    await twClient.messages.create({
+      from: BOT_NUMBER,
+      to,
+      contentSid: sid,
+      contentVariables: JSON.stringify({ "1": otp }),
+    });
+  } else {
+    await twClient.messages.create({
+      from: BOT_NUMBER,
+      to,
+      body: `Your KaryaSetu panel login code is ${otp}. It expires in 10 minutes. If you didn't request this, ignore this message.`,
+    });
   }
 }
 
@@ -299,10 +294,8 @@ router.post("/auth/send-otp", async (req, res) => {
       sentAt: Date.now(),
     };
 
-    // Send as SMS to the plain E.164 number (strip the "whatsapp:" prefix).
-    const plain = formatted.replace("whatsapp:", "");
-    await sendOtpSMS(plain, otp);
-    res.json({ success: true, message: "Code sent by SMS" });
+    await sendOtpWhatsApp(formatted, otp);
+    res.json({ success: true, message: "Code sent to your WhatsApp" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
