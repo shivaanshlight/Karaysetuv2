@@ -121,15 +121,15 @@
         <div class="login-sub">Organizer Web Panel — sign in to continue</div>
         <div id="step1">
           <div class="form-group">
-            <label class="form-label">Registered phone number</label>
+            <label class="form-label">Registered WhatsApp number</label>
             <input class="form-input" type="tel" id="loginPhone" placeholder="+91 98765 43210" />
           </div>
           <button class="login-btn" onclick="sendOTP()">Send code</button>
-          <div class="otp-note">We'll send a one-time code by SMS to your phone</div>
+          <div class="otp-note">We'll send a one-time code to your WhatsApp</div>
         </div>
         <div id="step2" style="display:none">
           <div class="form-group">
-            <label class="form-label">Enter the code sent to your phone</label>
+            <label class="form-label">Enter the code sent to your WhatsApp</label>
             <input class="form-input" type="text" id="otpInput" placeholder="Enter 6-digit code" maxlength="6" />
           </div>
           <button class="login-btn" onclick="verifyOTP()">Verify &amp; Login</button>
@@ -311,7 +311,7 @@
 
       async function sendOTP() {
         const phone = document.getElementById("loginPhone").value.trim();
-        if (!phone) { showToast("Please enter your phone number", "error"); return; }
+        if (!phone) { showToast("Please enter your WhatsApp number", "error"); return; }
         try {
           const res = await fetch(`${API}/api/auth/send-otp`, {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone }),
@@ -320,7 +320,7 @@
           if (res.ok) {
             document.getElementById("step1").style.display = "none";
             document.getElementById("step2").style.display = "block";
-            showToast("Code sent by SMS", "success");
+            showToast("Code sent to your WhatsApp", "success");
           } else { showToast(data.error || "Could not send code", "error"); }
         } catch { showToast("Could not connect to server", "error"); }
       }
