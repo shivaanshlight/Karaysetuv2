@@ -228,8 +228,9 @@ const RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute between sends
 // Move to Redis/DB for multi-instance deploys.
 const otpStore = {};
 
-// Deliver the OTP over SMS using Fast2SMS (India). Uses their ready-made "otp"
-// route — no Twilio number, no DLT setup. You only need a FAST2SMS_API_KEY.
+// Deliver the OTP over SMS using Fast2SMS "Quick SMS" route — no DLT, no website
+// verification. Sends to non-DND numbers using your wallet credit. You only need
+// a FAST2SMS_API_KEY.
 async function sendOtpSMS(toPlain, otp) {
   const apiKey = process.env.FAST2SMS_API_KEY;
   if (!apiKey) {
@@ -240,7 +241,12 @@ async function sendOtpSMS(toPlain, otp) {
   const resp = await fetch("https://www.fast2sms.com/dev/bulkV2", {
     method: "POST",
     headers: { authorization: apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify({ route: "otp", variables_values: otp, numbers: number }),
+    body: JSON.stringify({
+      route: "q",
+      message: `Your KaryaSetu login code is ${otp}. It is valid for 10 minutes.`,
+      language: "english",
+      numbers: number,
+    }),
   });
   const data = await resp.json().catch(() => ({}));
   if (!data.return) {
