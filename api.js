@@ -279,6 +279,14 @@ router.post("/auth/send-otp", async (req, res) => {
     );
 
     if (member.rows.length === 0) {
+      // Best-effort: also tell the number on WhatsApp it isn't a registered organizer.
+      twClient.messages
+        .create({
+          from: BOT_NUMBER,
+          to: formatted,
+          body: "You are not a registered organizer on KaryaSetu.",
+        })
+        .catch((e) => console.log("Not-registered WhatsApp notice failed:", e.message));
       return res
         .status(404)
         .json({ error: "You are not a registered organizer on KaryaSetu" });
