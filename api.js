@@ -47,15 +47,44 @@ async function getOrg(req, res, next) {
     const header = req.headers["authorization"] || "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : null;
     const payload = verifyToken(token);
-    if (!payload || !payload.org_id) {
-      return res.status(401).json({ error: "Unauthorized" });
+    if (!payload) return res.status(401).json({ error: "Unauthorized" });
+
+    // Backward-compat: old tokens carried a single org_id directly.
+    if (payload.org_id && !payload.phone) {
+      const r = await pool.query(`SELECT * FROM organizations WHERE org_id = $1`, [payload.org_id]);
+      if (!r.rows[0]) return res.status(401).json({ error: "Org not found" });
+      req.org = r.rows[0];
+      return next();
     }
 
-    const r = await pool.query(
-      `SELECT * FROM organizations WHERE org_id = $1`,
-      [payload.org_id],
-    );
-    if (!r.rows[0]) return res.status(401).json({ error: "Org not found" });
+    // Phone-identity token (multi-org). The caller may pick which org via the
+    // x-org-id header; we ALWAYS re-check that this phone is an active organizer
+    // of that org, so nobody can act on an org they don't head.
+    const phone = payload.phone;
+    if (!phone) return res.status(401).json({ error: "Unauthorized" });
+
+    const requestedOrgId = req.headers["x-org-id"];
+    let r;
+    if (requestedOrgId) {
+      r = await pool.query(
+        `SELECT o.* FROM organizations o
+         JOIN members m ON m.org_id = o.org_id
+         WHERE o.org_id = $1 AND m.whatsapp_number = $2
+           AND m.role = 'organizer' AND m.status = 'active' AND o.status = 'active'
+         LIMIT 1`,
+        [requestedOrgId, phone],
+      );
+    } else {
+      r = await pool.query(
+        `SELECT o.* FROM organizations o
+         JOIN members m ON m.org_id = o.org_id
+         WHERE m.whatsapp_number = $1
+           AND m.role = 'organizer' AND m.status = 'active' AND o.status = 'active'
+         ORDER BY o.org_name ASC LIMIT 1`,
+        [phone],
+      );
+    }
+    if (!r.rows[0]) return res.status(401).json({ error: "Not an organizer of this org" });
     req.org = r.rows[0];
     next();
   } catch (err) {
@@ -333,20 +362,30 @@ router.post("/auth/verify-otp", async (req, res) => {
 
     delete otpStore[formatted]; // single use
 
-    const member = await pool.query(
-      `SELECT m.*, o.org_name FROM members m
-       JOIN organizations o ON m.org_id = o.org_id
-       WHERE m.member_id = $1`,
-      [stored.memberId],
+    // All orgs this number is an ACTIVE ORGANIZER of (member-only orgs excluded).
+    const orgsRes = await pool.query(
+      `SELECT o.org_id, o.org_name, m.name AS user_name
+       FROM members m JOIN organizations o ON m.org_id = o.org_id
+       WHERE m.whatsapp_number = $1 AND m.role = 'organizer'
+         AND m.status = 'active' AND o.status = 'active'
+       ORDER BY o.org_name ASC`,
+      [formatted],
     );
-    const m = member.rows[0];
-    const token = createToken({ org_id: m.org_id, member_id: m.member_id });
+    const orgs = orgsRes.rows;
+    if (orgs.length === 0) {
+      return res.status(403).json({ error: "You are not a registered organizer on KaryaSetu" });
+    }
+
+    // Token carries the phone identity; the org is chosen per-request (x-org-id)
+    // and re-verified server-side, so they can switch between orgs they head.
+    const token = createToken({ phone: formatted });
     res.json({
       success: true,
       token,
-      org_id: m.org_id,
-      org_name: m.org_name,
-      user_name: m.name,
+      user_name: orgs[0].user_name,
+      org_id: orgs[0].org_id,
+      org_name: orgs[0].org_name,
+      orgs: orgs.map((o) => ({ org_id: o.org_id, org_name: o.org_name })),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
