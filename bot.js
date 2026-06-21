@@ -645,16 +645,9 @@ async function handleHelp(senderNumber, member) {
   if (member.role === "organizer") {
     t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n`;
   }
-  // Template variables can't contain newlines, so pass a single-line summary
-  // for the buttons template; the full multi-line text is the fallback.
-  const commandLine =
-    "List tasks, Delegated tasks, Overdue tasks, Add task, Update, Complete, Delete, Assign task, Remove assignment";
-  await sendWithButtons(
-    senderNumber,
-    process.env.HELP_CONTENT_SID,
-    { command_list: commandLine },
-    t,
-  );
+  // Plain-text help (no buttons) so the full command list — including the
+  // Organizer-only commands like "Add member" — is always shown.
+  await sendMessage(senderNumber, t);
 }
 
 // ─────────────────────────────────────────
