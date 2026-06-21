@@ -152,15 +152,56 @@ async function setLastTask(memberId, taskId) {
 // ─────────────────────────────────────────
 // LOOKUPS
 // ─────────────────────────────────────────
-async function findMember(whatsappNumber) {
+// All ACTIVE memberships for a number (one row per org it belongs to). A member
+// object here is shape-compatible with everything downstream (member fields +
+// org_name/timezone/org_id/task_counter).
+async function getActiveMemberships(whatsappNumber) {
   try {
     const result = await pool.query(
       `SELECT m.*, o.org_name, o.timezone, o.org_id, o.task_counter
        FROM members m JOIN organizations o ON m.org_id = o.org_id
-       WHERE m.whatsapp_number = $1 AND m.status = 'active' AND o.status = 'active' LIMIT 1`,
+       WHERE m.whatsapp_number = $1 AND m.status = 'active' AND o.status = 'active'
+       ORDER BY o.org_name ASC`,
       [whatsappNumber],
     );
-    return result.rows[0] || null;
+    return result.rows;
+  } catch (error) {
+    console.log("Error fetching memberships:", error.message);
+    return [];
+  }
+}
+async function getActiveOrgId(whatsappNumber) {
+  try {
+    const r = await pool.query(`SELECT org_id FROM active_org WHERE whatsapp_number = $1`, [whatsappNumber]);
+    return r.rows[0] ? r.rows[0].org_id : null;
+  } catch (e) { return null; }
+}
+async function setActiveOrg(whatsappNumber, orgId) {
+  try {
+    await pool.query(
+      `INSERT INTO active_org (whatsapp_number, org_id, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (whatsapp_number) DO UPDATE SET org_id = $2, updated_at = NOW()`,
+      [whatsappNumber, orgId],
+    );
+  } catch (e) { console.log("setActiveOrg failed:", e.message); }
+}
+async function clearActiveOrg(whatsappNumber) {
+  try { await pool.query(`DELETE FROM active_org WHERE whatsapp_number = $1`, [whatsappNumber]); } catch (e) { /* ignore */ }
+}
+
+// Resolve a single member for a number (used by the yes/no path in index.js).
+// 1 org → that one. Multiple → the saved active org if valid, else the first.
+async function findMember(whatsappNumber) {
+  try {
+    const ms = await getActiveMemberships(whatsappNumber);
+    if (ms.length === 0) return null;
+    if (ms.length === 1) return ms[0];
+    const activeId = await getActiveOrgId(whatsappNumber);
+    if (activeId) {
+      const m = ms.find((x) => x.org_id === activeId);
+      if (m) return m;
+    }
+    return ms[0];
   } catch (error) {
     console.log("Error finding member:", error.message);
     return null;
@@ -266,6 +307,76 @@ function parseChoice(message, options) {
 }
 
 // ─────────────────────────────────────────
+// MULTI-TEAM (CR-2) — a phone number can belong to more than one org.
+// We keep an "active team" per number; everything runs against that team.
+// Single-team users never see any of this.
+// ─────────────────────────────────────────
+function parseTeamChoice(message, memberships) {
+  const m = String(message).trim();
+  if (/^\d+$/.test(m)) {
+    const n = parseInt(m, 10);
+    return n >= 1 && n <= memberships.length ? n - 1 : null;
+  }
+  const lower = m.toLowerCase();
+  const matches = memberships
+    .map((o, i) => ({ o, i }))
+    .filter(({ o }) => o.org_name.toLowerCase().startsWith(lower));
+  return matches.length === 1 ? matches[0].i : null;
+}
+async function promptTeamChoice(senderNumber, memberships) {
+  let msg = `You're part of ${memberships.length} teams. Which one do you want to use? (reply 1, 2, …)\n\n`;
+  memberships.forEach((o, i) => {
+    msg += `${i + 1}) ${o.org_name}${o.role === "organizer" ? " (Organizer)" : ""}\n`;
+  });
+  msg += `\nYou can change anytime with *switch team*.`;
+  await sendMessage(senderNumber, msg);
+}
+// Returns the resolved member for a multi-team number, or null if a prompt/switch
+// was handled and the caller should stop.
+async function resolveTeam(senderNumber, message, memberships) {
+  const lower = message.toLowerCase().trim();
+
+  // "switch team(s)" / "teams" → forget the active team and re-show the menu.
+  if (/^(switch teams?|change teams?|switch orgs?|change orgs?|teams?|my teams?)$/.test(lower)) {
+    await clearActiveOrg(senderNumber);
+    await promptTeamChoice(senderNumber, memberships);
+    return null;
+  }
+  // "switch to <name>" → set directly if it matches one of their teams.
+  const sw = lower.match(/^(?:switch|change)(?: to)?\s+(.+)$/);
+  if (sw) {
+    const name = sw[1].trim();
+    const hits = memberships.filter((x) => x.org_name.toLowerCase().startsWith(name));
+    if (hits.length === 1) {
+      await setActiveOrg(senderNumber, hits[0].org_id);
+      await sendMessage(senderNumber, `✅ Switched to ${hits[0].org_name}.`);
+      return null;
+    }
+    await sendMessage(senderNumber, `I couldn't match "${name}" to one of your teams. Reply *switch team* to see them.`);
+    return null;
+  }
+
+  // Already have a valid active team?
+  const activeId = await getActiveOrgId(senderNumber);
+  if (activeId) {
+    const m = memberships.find((x) => x.org_id === activeId);
+    if (m) return m;
+    await clearActiveOrg(senderNumber); // stale (left/suspended) — re-choose
+  }
+
+  // No valid active team. Treat this message as a team choice if it looks like one.
+  const idx = parseTeamChoice(message, memberships);
+  if (idx !== null) {
+    await setActiveOrg(senderNumber, memberships[idx].org_id);
+    await sendMessage(senderNumber, `✅ You're now in ${memberships[idx].org_name}. Send a command like *my tasks* or *Help*.`);
+    return null;
+  }
+  // Otherwise, ask which team.
+  await promptTeamChoice(senderNumber, memberships);
+  return null;
+}
+
+// ─────────────────────────────────────────
 // MAIN MESSAGE HANDLER
 // ─────────────────────────────────────────
 async function handleMessage(incomingMessage, senderNumber) {
@@ -274,13 +385,27 @@ async function handleMessage(incomingMessage, senderNumber) {
 
   const t0 = Date.now();
   const message = incomingMessage.trim();
-  const member = await findMember(senderNumber);
-  console.log(`DB findMember took ${Date.now() - t0}ms`);
-  if (!member) {
+  const memberships = await getActiveMemberships(senderNumber);
+  console.log(`DB memberships took ${Date.now() - t0}ms (${memberships.length})`);
+  if (memberships.length === 0) {
     await sendMessage(senderNumber, "Hi! You're not registered with a KaryaSetu organization. Ask your Organizer to add you.");
     return;
   }
-  console.log("Member:", member.name, "| Role:", member.role);
+
+  let member;
+  if (memberships.length === 1) {
+    member = memberships[0];
+    // Single-team users have nothing to switch.
+    if (/^(switch teams?|change teams?|switch orgs?|change orgs?|my teams?|teams?)$/i.test(message.trim())) {
+      await sendMessage(senderNumber, `You're only in one team: ${member.org_name}.`);
+      return;
+    }
+  } else {
+    member = await resolveTeam(senderNumber, message, memberships);
+    if (!member) return; // a prompt or switch was handled
+    member.is_multi_team = true; // for small UI hints
+  }
+  console.log("Member:", member.name, "| Role:", member.role, "| Org:", member.org_name);
   const lower = message.toLowerCase();
 
   // ── Explicit config commands (clear any pending question first) ──
@@ -507,6 +632,9 @@ function optionList(matches) {
 // ─────────────────────────────────────────
 async function handleHelp(senderNumber, member) {
   let t = `*KaryaSetu Commands* 📋\n\n`;
+  if (member.is_multi_team) {
+    t += `_Current team: ${member.org_name} — reply *switch team* to change._\n\n`;
+  }
   t += `*Tasks related:*\n`;
   t += `• List tasks\n• Delegated tasks\n• Overdue tasks\n`;
   t += `• Add task [description]\n• Update [task] [new description]\n`;
