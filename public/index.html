@@ -285,6 +285,7 @@
         orgId: localStorage.getItem("ks_org_id") || null,
         orgName: localStorage.getItem("ks_org_name") || null,
         userName: localStorage.getItem("ks_user_name") || null,
+        orgs: (() => { try { return JSON.parse(localStorage.getItem("ks_orgs")) || []; } catch { return []; } })(),
         tasks: [], members: [], removingMemberId: null,
       };
 
@@ -299,7 +300,11 @@
       async function apiFetch(path, options = {}) {
         const res = await fetch(`${API}${path}`, {
           ...options,
-          headers: { ...(options.headers || {}), Authorization: `Bearer ${state.token}` },
+          headers: {
+            ...(options.headers || {}),
+            Authorization: `Bearer ${state.token}`,
+            ...(state.orgId ? { "x-org-id": state.orgId } : {}),
+          },
         });
         if (res.status === 401) {
           showToast("Session expired. Please log in again.", "error");
@@ -337,10 +342,12 @@
           if (res.ok) {
             state.token = data.token; state.orgId = data.org_id;
             state.orgName = data.org_name; state.userName = data.user_name;
+            state.orgs = data.orgs || [{ org_id: data.org_id, org_name: data.org_name }];
             localStorage.setItem("ks_token", state.token);
             localStorage.setItem("ks_org_id", state.orgId);
             localStorage.setItem("ks_org_name", state.orgName);
             localStorage.setItem("ks_user_name", state.userName);
+            localStorage.setItem("ks_orgs", JSON.stringify(state.orgs));
             showApp(); loadData();
           } else { showToast(data.error || "Wrong or expired code", "error"); }
         } catch { showToast("Could not connect to server", "error"); }
@@ -354,8 +361,33 @@
       function showApp() {
         document.getElementById("loginScreen").style.display = "none";
         document.getElementById("appShell").style.display = "flex";
-        document.getElementById("orgBadge").textContent = state.orgName || "Your Org";
+        renderOrgBadge();
         document.getElementById("sidebarUser").textContent = state.userName || "Organizer";
+      }
+      // Show the org name, or a dropdown to switch when the organizer heads more than one.
+      function renderOrgBadge() {
+        const el = document.getElementById("orgBadge");
+        if (state.orgs && state.orgs.length > 1) {
+          el.innerHTML =
+            `<select onchange="switchOrg(this.value)" style="background:transparent;border:0;color:inherit;font:inherit;cursor:pointer;outline:none">` +
+            state.orgs.map((o) =>
+              `<option value="${escapeHtml(o.org_id)}" ${String(o.org_id) === String(state.orgId) ? "selected" : ""}>${escapeHtml(o.org_name)} ▾</option>`
+            ).join("") +
+            `</select>`;
+        } else {
+          el.textContent = state.orgName || "Your Org";
+        }
+      }
+      // Switch which organization the panel is viewing (re-verified server-side).
+      async function switchOrg(orgId) {
+        const o = (state.orgs || []).find((x) => String(x.org_id) === String(orgId));
+        if (!o) return;
+        state.orgId = o.org_id; state.orgName = o.org_name;
+        localStorage.setItem("ks_org_id", state.orgId);
+        localStorage.setItem("ks_org_name", state.orgName);
+        renderOrgBadge();
+        showToast(`Switched to ${o.org_name}`, "success");
+        await loadData();
       }
 
       async function loadData() {
@@ -539,7 +571,9 @@
           });
           if (res.ok) {
             state.orgName = name; localStorage.setItem("ks_org_name", name);
-            document.getElementById("orgBadge").textContent = name; showToast("Settings saved", "success");
+            const cur = (state.orgs || []).find((o) => String(o.org_id) === String(state.orgId));
+            if (cur) { cur.org_name = name; localStorage.setItem("ks_orgs", JSON.stringify(state.orgs)); }
+            renderOrgBadge(); showToast("Settings saved", "success");
           } else showToast("Could not save settings", "error");
         } catch (e) { if (e.message !== "unauthorized") showToast("Could not connect to server", "error"); }
       }
