@@ -163,19 +163,41 @@ router.get("/analytics", getOrg, async (req, res) => {
 // ── CSV EXPORT OF ALL TASKS ──
 router.get("/tasks.csv", getOrg, async (req, res) => {
   try {
+    const tz = req.org.timezone || "Asia/Kolkata";
     const r = await pool.query(
       `SELECT t.task_id, t.title, own.name AS owner, asn.name AS assignee, t.status, t.priority,
-              t.due_date, t.created_at, t.completed_at
+              t.due_date, t.due_time, t.created_at, t.completed_at
        FROM tasks t
        LEFT JOIN members own ON t.owner_id = own.member_id
        LEFT JOIN members asn ON t.assignee_id = asn.member_id
        WHERE t.org_id=$1 AND t.status != 'deleted' ORDER BY t.created_at DESC`, [req.org.org_id]);
+
     const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const cols = ["task_id", "title", "owner", "assignee", "status", "priority", "due_date", "created_at", "completed_at"];
-    const lines = [cols.join(",")];
-    r.rows.forEach((row) => lines.push(cols.map((c) => esc(row[c])).join(",")));
+    // due_date is a calendar date — keep it as YYYY-MM-DD (no timezone shift).
+    const fmtDate = (v) => { if (!v) return ""; const d = new Date(v); return isNaN(d) ? "" : d.toISOString().slice(0, 10); };
+    // timestamps — show in the org's timezone, "YYYY-MM-DD HH:MM".
+    const fmtDT = (v) => {
+      if (!v) return "";
+      try { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(v)).replace(",", ""); }
+      catch { return ""; }
+    };
+    const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
+
+    const header = ["Task ID", "Title", "Owner", "Assignee", "Status", "Priority", "Due Date", "Due Time", "Created", "Completed"];
+    const lines = [header.join(",")];
+    r.rows.forEach((t) => {
+      lines.push([
+        t.task_id, t.title, t.owner || "", t.assignee || "Unassigned",
+        cap(t.status), cap(t.priority || "normal"),
+        fmtDate(t.due_date), t.due_time || "", fmtDT(t.created_at), fmtDT(t.completed_at),
+      ].map(esc).join(","));
+    });
+
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    const safeOrg = String(req.org.org_name || "tasks").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.send(lines.join("\n"));
+    res.setHeader("Content-Disposition", `attachment; filename="${safeOrg}-tasks-${today}.csv"`);
+    res.send("﻿" + lines.join("\r\n")); // BOM so Excel reads UTF-8 cleanly
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
