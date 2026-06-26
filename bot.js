@@ -282,6 +282,7 @@ const FAST_PATHS = {
   list_overdue_tasks: new Set(["overdue", "overdue tasks", "overdue task", "my overdue tasks", "overdue tasks list"]),
   list_all_tasks: new Set(["all tasks", "all open tasks", "all task", "all open task"]),
   list_members: new Set(["list members", "list users", "list member", "list user", "all members", "all users"]),
+  stats: new Set(["stats", "report", "reports", "statistics", "my stats", "my report"]),
   help: new Set(["help", "help me", "menu", "commands", "command list", "what can you do", "what can i do"]),
 };
 function fastPathIntent(message) {
@@ -507,6 +508,7 @@ async function dispatch(senderNumber, member, ai) {
       if (member.role !== "organizer") return sendMessage(senderNumber, "Sorry, only the Organizer can view all tasks.");
       return handleAllTasks(senderNumber, member);
     case "list_overdue_tasks": return handleOverdueTasks(senderNumber, member);
+    case "stats": return handleStats(senderNumber, member);
     case "list_members":
       if (member.role !== "organizer") return sendMessage(senderNumber, "Sorry, only the Organizer can list users.");
       return handleListMembers(senderNumber, member);
@@ -639,7 +641,7 @@ async function handleHelp(senderNumber, member) {
   t += `• List tasks\n• Delegated tasks\n• Overdue tasks\n`;
   t += `• Add task [description]\n• Update [task] [new description]\n`;
   t += `• Complete [task name or id]\n• Delete [task id]\n`;
-  t += `• Assign task [task] to [user]\n• Remove assignment [task]\n`;
+  t += `• Assign task [task] to [user]\n• Remove assignment [task]\n• Stats\n`;
   t += `_Long lists show 20 at a time — reply *more* for next, *back* for previous._\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
@@ -1203,6 +1205,32 @@ async function handleTasksAssignedTo(senderNumber, member, ai) {
       return;
     }
     return listTasksFor(senderNumber, member, matches[0]);
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+
+// ─────────────────────────────────────────
+// STATS / REPORT
+// ─────────────────────────────────────────
+async function handleStats(senderNumber, member) {
+  try {
+    const today = todayInTimezone(member.timezone);
+    const isOrg = member.role === "organizer";
+    const scope = isOrg ? "t.org_id = $1" : "(t.assignee_id = $1 OR t.owner_id = $1)";
+    const id = isOrg ? member.org_id : member.member_id;
+    const open = await pool.query(`SELECT COUNT(*) FROM tasks t WHERE ${scope} AND t.status NOT IN ('completed','deleted')`, [id]);
+    const over = await pool.query(`SELECT COUNT(*) FROM tasks t WHERE ${scope} AND t.due_date < $2 AND t.status NOT IN ('completed','deleted')`, [id, today]);
+    const doneWk = await pool.query(`SELECT COUNT(*) FROM tasks t WHERE ${scope} AND t.status='completed' AND t.completed_at > NOW() - INTERVAL '7 days'`, [id]);
+    let msg = `*📊 ${isOrg ? member.org_name : "Your"} stats*\n\n`;
+    msg += `🟢 Open: ${open.rows[0].count}\n⚠️ Overdue: ${over.rows[0].count}\n✅ Completed this week: ${doneWk.rows[0].count}\n`;
+    if (isOrg) {
+      const per = await pool.query(
+        `SELECT m.name, COUNT(t.task_id) AS open FROM members m
+         LEFT JOIN tasks t ON t.assignee_id = m.member_id AND t.status NOT IN ('completed','deleted')
+         WHERE m.org_id = $1 AND m.status = 'active' GROUP BY m.member_id, m.name ORDER BY open DESC`, [member.org_id]);
+      msg += `\n*Workload*\n`;
+      per.rows.forEach((x) => { msg += `• ${x.name} — ${x.open} open\n`; });
+    }
+    await sendMessage(senderNumber, msg);
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
 
