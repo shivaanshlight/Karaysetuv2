@@ -146,6 +146,7 @@
         <nav class="nav">
           <button class="nav-item active" onclick="showPage('dashboard', this)">Dashboard</button>
           <button class="nav-item" onclick="showPage('tasks', this)">Tasks</button>
+          <button class="nav-item" onclick="showPage('analytics', this)">Analytics</button>
           <button class="nav-item" onclick="showPage('members', this)">Members</button>
           <button class="nav-item" onclick="showPage('settings', this)">Settings</button>
         </nav>
@@ -201,6 +202,15 @@
               <tbody id="taskBody"><tr><td colspan="7"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-title">Loading...</div></div></td></tr></tbody>
             </table>
           </div>
+        </div>
+
+        <!-- ANALYTICS -->
+        <div id="page-analytics" class="page">
+          <div class="page-header">
+            <div><div class="page-title">Analytics</div><div class="page-subtitle">Team performance &amp; reports</div></div>
+            <button class="btn btn-primary" onclick="downloadCSV()">⬇ Export CSV</button>
+          </div>
+          <div id="analyticsBody"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-title">Loading...</div></div></div>
         </div>
 
         <!-- MEMBERS -->
@@ -584,6 +594,63 @@
         document.querySelectorAll(".nav-item").forEach((n) => n.classList.remove("active"));
         document.getElementById("page-" + pageId).classList.add("active");
         if (btn) btn.classList.add("active");
+        if (pageId === "analytics") loadAnalytics();
+      }
+
+      // ── ANALYTICS ──
+      async function loadAnalytics() {
+        const el = document.getElementById("analyticsBody");
+        try {
+          const res = await apiFetch("/api/analytics");
+          if (!res.ok) { el.innerHTML = '<div class="empty"><div class="empty-title">Could not load analytics</div></div>'; return; }
+          const d = await res.json();
+          const maxW = Math.max(1, ...d.workload.map((w) => w.open));
+          const maxT = Math.max(1, ...d.trend.map((t) => Math.max(t.created, t.completed)));
+          el.innerHTML = `
+            <div class="stat-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px">
+              ${statCard("Open", d.open, "var(--accent)")}
+              ${statCard("Overdue", d.overdue, "var(--red)")}
+              ${statCard("Completed / week", d.completedWeek, "var(--green,#22c55e)")}
+              ${statCard("Completion rate", d.completionRate + "%", "var(--text)")}
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+              <div class="card" style="padding:18px;border:1px solid var(--border,#2a2f3a);border-radius:12px;background:var(--card,#1a1f29)">
+                <div style="font-weight:600;margin-bottom:14px">Workload (open tasks)</div>
+                ${d.workload.length ? d.workload.map((w) => `
+                  <div style="margin-bottom:10px">
+                    <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>${escapeHtml(w.name)}</span><span>${w.open}</span></div>
+                    <div style="height:8px;background:rgba(255,255,255,.08);border-radius:6px;overflow:hidden"><div style="height:100%;width:${Math.round((w.open / maxW) * 100)}%;background:var(--accent)"></div></div>
+                  </div>`).join("") : '<div class="muted">No active members.</div>'}
+              </div>
+              <div class="card" style="padding:18px;border:1px solid var(--border,#2a2f3a);border-radius:12px;background:var(--card,#1a1f29)">
+                <div style="font-weight:600;margin-bottom:14px">Created vs Completed (4 weeks)</div>
+                ${d.trend.length ? d.trend.map((t) => `
+                  <div style="margin-bottom:12px">
+                    <div style="font-size:12px;color:var(--muted,#8a93a3);margin-bottom:4px">Week of ${escapeHtml(t.week)}</div>
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px"><span style="width:62px;font-size:11px">Created</span><div style="flex:1;height:7px;background:rgba(255,255,255,.08);border-radius:5px"><div style="height:100%;width:${Math.round((t.created / maxT) * 100)}%;background:#7c93ff;border-radius:5px"></div></div><span style="font-size:11px">${t.created}</span></div>
+                    <div style="display:flex;align-items:center;gap:6px"><span style="width:62px;font-size:11px">Completed</span><div style="flex:1;height:7px;background:rgba(255,255,255,.08);border-radius:5px"><div style="height:100%;width:${Math.round((t.completed / maxT) * 100)}%;background:#22c55e;border-radius:5px"></div></div><span style="font-size:11px">${t.completed}</span></div>
+                  </div>`).join("") : '<div class="muted">No recent activity.</div>'}
+              </div>
+            </div>`;
+        } catch (e) { el.innerHTML = '<div class="empty"><div class="empty-title">Could not load analytics</div></div>'; }
+      }
+      function statCard(label, value, color) {
+        return `<div style="padding:18px;border:1px solid var(--border,#2a2f3a);border-radius:12px;background:var(--card,#1a1f29)">
+          <div style="font-size:30px;font-weight:700;color:${color}">${escapeHtml(value)}</div>
+          <div style="font-size:13px;color:var(--muted,#8a93a3);margin-top:4px">${escapeHtml(label)}</div></div>`;
+      }
+      async function downloadCSV() {
+        try {
+          const res = await apiFetch("/api/tasks.csv");
+          if (!res.ok) { showToast("Could not export", "error"); return; }
+          const text = await res.text();
+          const blob = new Blob([text], { type: "text/csv" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = "karyasetu-tasks.csv"; document.body.appendChild(a); a.click();
+          a.remove(); URL.revokeObjectURL(url);
+          showToast("CSV downloaded", "success");
+        } catch { showToast("Could not export", "error"); }
       }
       function closeModal(id) { document.getElementById(id).classList.remove("open"); }
       function showToast(msg, type = "success") {
