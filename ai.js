@@ -35,6 +35,7 @@ JSON structure:
   "assignee_name": "the name of who to assign to, exactly as written (keep initials and full names like 'M Achyuth'), else null",
   "due_date": "YYYY-MM-DD or null",
   "due_time": "24-hour time HH:MM if the user gave a time (e.g. '5pm'->'17:00', '9:30 am'->'09:30'), else null",
+  "recurrence": "daily|weekly|monthly if the task repeats (e.g. 'every monday'->weekly, 'daily'->daily, 'every month'->monthly), else null",
   "priority": "high or normal or low or null",
   "task_reference": "a task id or partial task name the user is referring to, else null",
   "member_name": "name of member for add/remove/rename (the CURRENT name), exactly as written, else null",
@@ -84,6 +85,7 @@ Examples:
 "add task call the vendor, confirm pricing and email me the quote by fri" -> {"intent":"create_task","task_title":"call the vendor, confirm pricing and email me the quote","due_date":"<this friday>","confidence":0.92}
 "assign ks3 to M Achyuth 9876543210" -> {"intent":"reassign_task","task_reference":"KS-003","assignee_name":"M Achyuth","phone_number":"9876543210","confidence":0.92}
 "add task" -> {"intent":"create_task","task_title":null,"confidence":0.9}
+"every monday post the weekly report" -> {"intent":"create_task","task_title":"post the weekly report","recurrence":"weekly","due_date":"<next monday>","confidence":0.9}
 "add task submit report by tomorrow 5pm" -> {"intent":"create_task","task_title":"submit report","due_date":"<tomorrow>","due_time":"17:00","confidence":0.93}
 "rename Achyuth to Achyuth Kumar" -> {"intent":"update_member_name","member_name":"Achyuth","new_name":"Achyuth Kumar","confidence":0.95}
 "change name of 9740070902 to Priya Sharma" -> {"intent":"update_member_name","phone_number":"9740070902","new_name":"Priya Sharma","confidence":0.93}
