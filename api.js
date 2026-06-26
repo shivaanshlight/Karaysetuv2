@@ -114,6 +114,73 @@ router.get("/tasks", getOrg, async (req, res) => {
   }
 });
 
+// ── ANALYTICS ──
+router.get("/analytics", getOrg, async (req, res) => {
+  try {
+    const orgId = req.org.org_id;
+    const tz = req.org.timezone || "Asia/Kolkata";
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+
+    const open = await pool.query(`SELECT COUNT(*) FROM tasks WHERE org_id=$1 AND status NOT IN ('completed','deleted')`, [orgId]);
+    const overdue = await pool.query(`SELECT COUNT(*) FROM tasks WHERE org_id=$1 AND due_date < $2 AND status NOT IN ('completed','deleted')`, [orgId, today]);
+    const completed = await pool.query(`SELECT COUNT(*) FROM tasks WHERE org_id=$1 AND status='completed'`, [orgId]);
+    const completedWeek = await pool.query(`SELECT COUNT(*) FROM tasks WHERE org_id=$1 AND status='completed' AND completed_at > NOW() - INTERVAL '7 days'`, [orgId]);
+
+    const openN = parseInt(open.rows[0].count, 10);
+    const completedN = parseInt(completed.rows[0].count, 10);
+    const completionRate = completedN + openN > 0 ? Math.round((completedN / (completedN + openN)) * 100) : 0;
+
+    const workload = await pool.query(
+      `SELECT m.name, COUNT(t.task_id) AS open
+       FROM members m LEFT JOIN tasks t ON t.assignee_id = m.member_id AND t.status NOT IN ('completed','deleted')
+       WHERE m.org_id=$1 AND m.status='active' GROUP BY m.member_id, m.name ORDER BY open DESC`, [orgId]);
+
+    const created = await pool.query(
+      `SELECT to_char(date_trunc('week', created_at),'YYYY-MM-DD') wk, COUNT(*) c
+       FROM tasks WHERE org_id=$1 AND status!='deleted' AND created_at > NOW() - INTERVAL '4 weeks' GROUP BY 1`, [orgId]);
+    const comp = await pool.query(
+      `SELECT to_char(date_trunc('week', completed_at),'YYYY-MM-DD') wk, COUNT(*) c
+       FROM tasks WHERE org_id=$1 AND status='completed' AND completed_at > NOW() - INTERVAL '4 weeks' GROUP BY 1`, [orgId]);
+    const weeks = {};
+    created.rows.forEach((r) => { weeks[r.wk] = weeks[r.wk] || { created: 0, completed: 0 }; weeks[r.wk].created = parseInt(r.c, 10); });
+    comp.rows.forEach((r) => { weeks[r.wk] = weeks[r.wk] || { created: 0, completed: 0 }; weeks[r.wk].completed = parseInt(r.c, 10); });
+    const trend = Object.keys(weeks).sort().map((wk) => ({ week: wk, created: weeks[wk].created, completed: weeks[wk].completed }));
+
+    res.json({
+      open: openN,
+      overdue: parseInt(overdue.rows[0].count, 10),
+      completedTotal: completedN,
+      completedWeek: parseInt(completedWeek.rows[0].count, 10),
+      completionRate,
+      workload: workload.rows.map((x) => ({ name: x.name, open: parseInt(x.open, 10) })),
+      trend,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── CSV EXPORT OF ALL TASKS ──
+router.get("/tasks.csv", getOrg, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT t.task_id, t.title, own.name AS owner, asn.name AS assignee, t.status, t.priority,
+              t.due_date, t.created_at, t.completed_at
+       FROM tasks t
+       LEFT JOIN members own ON t.owner_id = own.member_id
+       LEFT JOIN members asn ON t.assignee_id = asn.member_id
+       WHERE t.org_id=$1 AND t.status != 'deleted' ORDER BY t.created_at DESC`, [req.org.org_id]);
+    const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const cols = ["task_id", "title", "owner", "assignee", "status", "priority", "due_date", "created_at", "completed_at"];
+    const lines = [cols.join(",")];
+    r.rows.forEach((row) => lines.push(cols.map((c) => esc(row[c])).join(",")));
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.send(lines.join("\n"));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET ALL MEMBERS ──
 // PRD: Section 10.2 — member management
 router.get("/members", getOrg, async (req, res) => {
