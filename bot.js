@@ -409,6 +409,11 @@ async function handleMessage(incomingMessage, senderNumber) {
   console.log("Member:", member.name, "| Role:", member.role, "| Org:", member.org_name);
   const lower = message.toLowerCase();
 
+  // ── QoL fast commands ──
+  if (/^undo$/i.test(lower)) { await clearConvoState(member.member_id); await handleUndo(senderNumber, member); return; }
+  const sn = lower.match(/^snooze\b(.*)$/);
+  if (sn) { await clearConvoState(member.member_id); await handleSnooze(senderNumber, member, sn[1].trim()); return; }
+
   // ── Explicit config commands (clear any pending question first) ──
   const rb = lower.match(/remind\s+before\s+(\d+)\s*(week|weeks|day|days|hour|hours|minute|minutes|min|mins)/);
   if (rb) {
@@ -595,7 +600,7 @@ async function resumeChoice(senderNumber, member, convo, chosen) {
   if (convo.purpose === "create_assignee") {
     const ctx = convo.context || {};
     return createTaskWithAssignee(senderNumber, member, {
-      title: ctx.title, due_date: ctx.due_date, due_time: ctx.due_time, priority: ctx.priority,
+      title: ctx.title, due_date: ctx.due_date, due_time: ctx.due_time, recurrence: ctx.recurrence, priority: ctx.priority,
       assigneeId: chosen.member_id, assigneeName: chosen.name, assigneeNumber: chosen.whatsapp_number,
     });
   }
@@ -642,6 +647,8 @@ async function handleHelp(senderNumber, member) {
   t += `• Add task [description]\n• Update [task] [new description]\n`;
   t += `• Complete [task name or id]\n• Delete [task id]\n`;
   t += `• Assign task [task] to [user]\n• Remove assignment [task]\n• Stats\n`;
+  t += `• Snooze [task] (remind tomorrow) • Undo (revert last)\n`;
+  t += `_Tip: "every monday post report" makes a repeating task 🔁._\n`;
   t += `_Long lists show 20 at a time — reply *more* for next, *back* for previous._\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
@@ -665,15 +672,15 @@ async function createTaskWithAssignee(senderNumber, member, opts) {
          UPDATE organizations SET task_counter = task_counter + 1
          WHERE org_id = $1 RETURNING task_counter
        )
-       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, due_time, priority)
-       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4, $5, $6, $7
+       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, due_time, priority, recurrence)
+       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4, $5, $6, $7, $8
        FROM bumped
        RETURNING task_id`,
-      [member.org_id, opts.title, member.member_id, opts.assigneeId, opts.due_date || null, opts.due_time || null, opts.priority || "normal"],
+      [member.org_id, opts.title, member.member_id, opts.assigneeId, opts.due_date || null, opts.due_time || null, opts.priority || "normal", opts.recurrence || null],
     );
     const taskId = r.rows[0].task_id;
     const dueTxt = formatDue(opts.due_date, opts.due_time);
-    await sendMessage(senderNumber, `Added ✅ ${taskId}\n📋 ${opts.title}\n👤 Assigned to: ${opts.assigneeName}\n📅 Due: ${dueTxt}`);
+    await sendMessage(senderNumber, `Added ✅ ${taskId}\n📋 ${opts.title}\n👤 Assigned to: ${opts.assigneeName}\n📅 Due: ${dueTxt}${opts.recurrence ? `\n🔁 Repeats: ${opts.recurrence}` : ""}`);
     // Non-blocking: remember last task; don't make the user wait on it.
     setLastTask(member.member_id, taskId);
     if (opts.assigneeId !== member.member_id && opts.assigneeNumber) {
@@ -704,16 +711,16 @@ async function handleCreateTask(senderNumber, member, ai) {
       const matches = await resolveMembers(ai.assignee_name, ai.phone_number, member.org_id);
       if (matches.length === 0) {
         await sendMessage(senderNumber, `${ai.assignee_name || ai.phone_number} is not a user of ${member.org_name}. Assigning to you instead.`);
-        return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
+        return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
       }
       if (matches.length > 1) {
-        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal" } });
+        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal" } });
         await sendMessage(senderNumber, choiceMenu(ai.assignee_name, matches));
         return;
       }
-      return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
+      return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
     }
-    return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
+    return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
   } catch (error) {
     console.log("Error:", error.message);
     await sendMessage(senderNumber, "Something went wrong. Please try again.");
@@ -750,10 +757,65 @@ async function executeCompleteTask(senderNumber, member, action) {
     const data = action.action_data;
     await pool.query(`UPDATE tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [data.task_id, member.org_id]);
     await pool.query(`UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`, [action.action_id]);
-    await sendMessage(senderNumber, `Great work! ✅ ${data.task_id} marked complete.`);
+    await rememberUndo(member.member_id, data.task_id, "completed");
+    const next = await spawnRecurrence(member.org_id, data.task_id);
+    await sendMessage(senderNumber, `Great work! ✅ ${data.task_id} marked complete.${next ? `\n🔁 Next one created: ${next}.` : ""}\n_Reply *undo* within 10 min to revert._`);
     if (data.owner_id !== member.member_id && data.owner_number) {
       await sendMessage(data.owner_number, `✅ ${data.task_id} — ${data.task_title} has been completed by ${member.name}.`);
     }
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+
+// ─────────────────────────────────────────
+// QoL: recurrence + undo helpers
+// ─────────────────────────────────────────
+// When a recurring task is completed, create the next instance with the due
+// date advanced. Returns the new task id (or null).
+async function spawnRecurrence(orgId, taskId) {
+  try {
+    const r = await pool.query(`SELECT * FROM tasks WHERE org_id = $1 AND task_id = $2`, [orgId, taskId]);
+    const t = r.rows[0];
+    if (!t || !t.recurrence) return null;
+    const step = { daily: "1 day", weekly: "1 week", monthly: "1 month" }[t.recurrence];
+    if (!step) return null;
+    const cr = await pool.query(
+      `WITH bumped AS (UPDATE organizations SET task_counter = task_counter + 1 WHERE org_id = $1 RETURNING task_counter)
+       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, due_time, priority, recurrence)
+       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4,
+              (COALESCE($5::date, CURRENT_DATE) + INTERVAL '${step}')::date, $6, $7, $8
+       FROM bumped RETURNING task_id`,
+      [orgId, t.title, t.owner_id, t.assignee_id, t.due_date, t.due_time, t.priority, t.recurrence],
+    );
+    return cr.rows[0].task_id;
+  } catch (e) { console.log("spawnRecurrence error:", e.message); return null; }
+}
+async function rememberUndo(memberId, taskId, prevAction) {
+  try {
+    await pool.query(`UPDATE members SET last_undo = $1 WHERE member_id = $2`,
+      [JSON.stringify({ task_id: taskId, action: prevAction, at: Date.now() }), memberId]);
+  } catch (e) { /* ignore */ }
+}
+async function handleUndo(senderNumber, member) {
+  try {
+    const r = await pool.query(`SELECT last_undo FROM members WHERE member_id = $1`, [member.member_id]);
+    const u = r.rows[0] && r.rows[0].last_undo;
+    if (!u || !u.task_id) return sendMessage(senderNumber, "Nothing to undo.");
+    if (Date.now() - (u.at || 0) > 10 * 60 * 1000) return sendMessage(senderNumber, "That action is too old to undo (10-min limit).");
+    await pool.query(`UPDATE tasks SET status = 'open', completed_at = NULL, updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [u.task_id, member.org_id]);
+    await pool.query(`UPDATE members SET last_undo = NULL WHERE member_id = $1`, [member.member_id]);
+    await sendMessage(senderNumber, `Undone ↩️ ${u.task_id} is back to open.`);
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+// "snooze [task]" — push a task's reminder to tomorrow.
+async function handleSnooze(senderNumber, member, ref) {
+  try {
+    const r = ref || member.last_task_id;
+    if (!r) return sendMessage(senderNumber, "Which task? Example: snooze KS-004");
+    const task = await findTaskByReference(member.org_id, r);
+    if (!task) return sendMessage(senderNumber, `I couldn't find that task.`);
+    await pool.query(`UPDATE tasks SET snooze_until = (CURRENT_DATE + INTERVAL '1 day')::date, reminded_on = NULL WHERE task_id = $1 AND org_id = $2`, [task.task_id, member.org_id]);
+    await setLastTask(member.member_id, task.task_id);
+    await sendMessage(senderNumber, `⏰ Okay — I'll remind you about ${task.task_id} tomorrow.`);
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
 
@@ -966,7 +1028,8 @@ async function executeDeleteTask(senderNumber, member, action) {
     const data = action.action_data;
     await pool.query(`UPDATE tasks SET status = 'deleted', updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [data.task_id, member.org_id]);
     await pool.query(`UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`, [action.action_id]);
-    await sendMessage(senderNumber, `${data.task_id} has been deleted.`);
+    await rememberUndo(member.member_id, data.task_id, "deleted");
+    await sendMessage(senderNumber, `${data.task_id} has been deleted.\n_Reply *undo* within 10 min to restore it._`);
     if (data.assignee_id && data.assignee_id !== member.member_id && data.assignee_number) {
       await sendMessage(data.assignee_number, `${data.task_id} — ${data.task_title} has been deleted by ${member.name}.`);
     }
