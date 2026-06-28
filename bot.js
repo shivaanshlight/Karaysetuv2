@@ -749,8 +749,9 @@ async function handleCreateTask(senderNumber, member, ai) {
     if (ai.assignee_name || ai.phone_number) {
       const matches = await resolveMembers(ai.assignee_name, ai.phone_number, member.org_id);
       if (matches.length === 0) {
-        await sendMessage(senderNumber, `${ai.assignee_name || ai.phone_number} is not a user of ${member.org_name}. Assigning to you instead.`);
-        return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
+        const who = ai.assignee_name || ai.phone_number;
+        await sendMessage(senderNumber, `${who} is not a member of ${member.org_name}, so I didn't create the task.\n\nAdd them first: *Add member ${ai.assignee_name || "[name]"} [number]*\nOr send the task without a name to keep it for yourself.`);
+        return;
       }
       if (matches.length > 1) {
         await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: cleanTaskTitle(ai.task_title, ai.assignee_name), due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal" } });
