@@ -409,9 +409,19 @@ async function handleMessage(incomingMessage, senderNumber) {
   console.log("Member:", member.name, "| Role:", member.role, "| Org:", member.org_name);
   const lower = message.toLowerCase();
 
-  // ── QoL fast commands ──
+  // ── QoL fast commands (deterministic — no AI needed) ──
   const sn = lower.match(/^snooze\b(.*)$/);
   if (sn) { await clearConvoState(member.member_id); await handleSnooze(senderNumber, member, sn[1].trim()); return; }
+  const ng = lower.match(/^nudge\b\s*(.*)$/);
+  if (ng && ng[1].trim()) { await clearConvoState(member.member_id); await handleNudge(senderNumber, member, { member_name: ng[1].trim() }); return; }
+  // Time report: "...tasks created/closed in last N minutes/hours/days/weeks/months"
+  const tr = lower.match(/\b(created|closed|completed|done)\b[\s\S]*?(\d+)\s*(minute|min|hour|hr|day|week|month)s?\b/);
+  if (tr && /\btask/.test(lower) && /\b(last|past)\b/.test(lower)) {
+    await clearConvoState(member.member_id);
+    const type = /(closed|completed|done)/.test(tr[1]) ? "closed" : "created";
+    await handleTimeReport(senderNumber, member, { report_type: type, report_window: `${tr[2]} ${tr[3]}` });
+    return;
+  }
 
   // ── Explicit config commands (clear any pending question first) ──
   const rb = lower.match(/remind\s+before\s+(\d+)\s*(week|weeks|day|days|hour|hours|minute|minutes|min|mins)/);
@@ -1335,10 +1345,24 @@ async function doNudge(senderNumber, member, target) {
 // ─────────────────────────────────────────
 // TIME REPORT — tasks created / closed in the last N days
 // ─────────────────────────────────────────
+// Parse a flexible time window ("12 days", "1 hour", "2 weeks") into a safe
+// Postgres interval + a human label. Falls back to 7 days.
+function parseWindow(w) {
+  const m = String(w || "").match(/(\d+)\s*(minute|min|hour|hr|day|week|month)s?/i);
+  if (!m) return { interval: "7 days", label: "7 days" };
+  const n = Math.min(9999, Math.max(1, parseInt(m[1], 10)));
+  let u = m[2].toLowerCase();
+  if (u.startsWith("min")) u = "minute";
+  else if (u.startsWith("hr") || u.startsWith("hour")) u = "hour";
+  else if (u.startsWith("day")) u = "day";
+  else if (u.startsWith("week")) u = "week";
+  else if (u.startsWith("month")) u = "month";
+  return { interval: `${n} ${u}`, label: `${n} ${u}${n > 1 ? "s" : ""}` };
+}
 async function handleTimeReport(senderNumber, member, ai) {
   try {
     const type = ai.report_type === "closed" ? "closed" : "created";
-    const days = Math.min(365, Math.max(1, parseInt(ai.report_days, 10) || 7));
+    const win = parseWindow(ai.report_window || (ai.report_days ? `${ai.report_days} days` : ""));
     const isOrg = member.role === "organizer";
     const scope = isOrg ? "t.org_id = $1" : "(t.assignee_id = $1 OR t.owner_id = $1)";
     const id = isOrg ? member.org_id : member.member_id;
@@ -1347,10 +1371,10 @@ async function handleTimeReport(senderNumber, member, ai) {
     const r = await pool.query(
       `SELECT t.task_id, t.title, t.${col} AS ts, a.name AS assignee_name
        FROM tasks t LEFT JOIN members a ON t.assignee_id = a.member_id
-       WHERE ${scope} AND ${statusFilter} AND t.${col} > NOW() - ($2 || ' days')::interval
-       ORDER BY t.${col} DESC LIMIT 30`, [id, String(days)]);
-    if (r.rows.length === 0) { await sendMessage(senderNumber, `No tasks ${type} in the last ${days} days.`); return; }
-    let msg = `*🗂 Tasks ${type} (last ${days} days) — ${r.rows.length}*\n\n`;
+       WHERE ${scope} AND ${statusFilter} AND t.${col} > NOW() - ($2)::interval
+       ORDER BY t.${col} DESC LIMIT 30`, [id, win.interval]);
+    if (r.rows.length === 0) { await sendMessage(senderNumber, `No tasks ${type} in the last ${win.label}.`); return; }
+    let msg = `*🗂 Tasks ${type} (last ${win.label}) — ${r.rows.length}*\n\n`;
     r.rows.forEach((t) => {
       const d = t.ts ? new Date(t.ts).toDateString() : "";
       msg += `${t.task_id} | ${t.title}${t.assignee_name ? ` | ${t.assignee_name}` : ""} | ${d}\n`;
