@@ -806,17 +806,21 @@ async function spawnRecurrence(orgId, taskId) {
 // e.g. "snooze KS-004 2 hours", "snooze 30 min", "snooze KS-004 1 day".
 function parseSnoozeArgs(text) {
   const s = String(text || "").trim();
-  const dm = s.match(/(\d+)\s*(day|days|hour|hours|hr|hrs|minute|minutes|min|mins)/i);
+  // Single unit forms with optional trailing "s" — so "2 hours" matches fully
+  // (and doesn't leave a stray "s" stuck to the task id).
+  const re = /(\d+)\s*(day|week|hour|hr|minute|min)s?\b/i;
+  const dm = s.match(re);
   let interval = "1 hour", label = "1 hour";
   if (dm) {
     const n = parseInt(dm[1], 10);
     const u = dm[2].toLowerCase();
     if (u.startsWith("day")) { interval = `${n} day`; label = `${n} day${n > 1 ? "s" : ""}`; }
+    else if (u.startsWith("week")) { interval = `${n} week`; label = `${n} week${n > 1 ? "s" : ""}`; }
     else if (u.startsWith("h")) { interval = `${n} hour`; label = `${n} hour${n > 1 ? "s" : ""}`; }
     else { interval = `${n} minute`; label = `${n} min`; }
   }
   // The task reference is whatever remains after removing the duration words.
-  const ref = s.replace(/(\d+)\s*(day|days|hour|hours|hr|hrs|minute|minutes|min|mins)/i, "").trim();
+  const ref = s.replace(re, "").trim();
   return { interval, label, ref };
 }
 async function handleSnooze(senderNumber, member, text) {
