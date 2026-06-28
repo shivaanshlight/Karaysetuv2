@@ -490,8 +490,16 @@ async function handleMessage(incomingMessage, senderNumber) {
 
   const orgMembers = await getOrgMembers(member.org_id);
   const today = todayInTimezone(member.timezone);
+  // Give the AI the current open tasks so it resolves references to exact IDs.
+  let recentTasks = [];
+  try {
+    const rt = await pool.query(
+      `SELECT task_id, title FROM tasks WHERE org_id = $1 AND status NOT IN ('completed','deleted')
+       ORDER BY created_at DESC LIMIT 25`, [member.org_id]);
+    recentTasks = rt.rows;
+  } catch (e) { /* ignore — AI still works without it */ }
   const aiStart = Date.now();
-  const ai = await understandMessage(message, member.name, orgMembers, today);
+  const ai = await understandMessage(message, member.name, orgMembers, today, recentTasks);
   console.log(`AI intent: ${ai.intent} | Confidence: ${ai.confidence} | AI took ${Date.now() - aiStart}ms`);
 
   // ── Conversation memory: try to treat this message as an answer ──
@@ -648,6 +656,25 @@ function optionList(matches) {
   return matches.map((m) => ({ member_id: m.member_id, name: m.name, whatsapp_number: m.whatsapp_number }));
 }
 
+// Safety-net: strip the assignee phrase out of a task title so it's clean even
+// if the AI left it in (e.g. "dance for harita" + assignee Harita -> "dance").
+function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function cleanTaskTitle(title, assigneeName) {
+  if (!title || !assigneeName) return title;
+  const full = escapeRegex(assigneeName.trim());
+  const first = escapeRegex(assigneeName.trim().split(/\s+/)[0]);
+  const nm = `(?:${full}|${first})`;
+  let t = title;
+  // "remind <name> [to]" — drop the verb-of-assignment too
+  t = t.replace(new RegExp(`\\bremind\\s+${nm}\\b\\s*(?:to\\s+)?`, "ig"), " ");
+  // "for/to/assign to/assigned to <name>"
+  t = t.replace(new RegExp(`\\s*\\b(?:assign(?:ed)?\\s+to|for|to)\\s+${nm}\\b`, "ig"), " ");
+  // a bare leftover name at the start or end
+  t = t.replace(new RegExp(`(^\\s*${nm}\\b[\\s,:-]*)|([\\s,:-]*\\b${nm}\\s*$)`, "ig"), " ");
+  t = t.replace(/\s{2,}/g, " ").replace(/^[\s,;:-]+|[\s,;:-]+$/g, "").trim();
+  return t || title; // if cleaning emptied it, keep the original
+}
+
 // ─────────────────────────────────────────
 // HELP
 // ─────────────────────────────────────────
@@ -668,8 +695,6 @@ async function handleHelp(senderNumber, member) {
   if (member.role === "organizer") {
     t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n`;
   }
-  // Plain-text help (no buttons) so the full command list — including the
-  // Organizer-only commands like "Add member" — is always shown.
   await sendMessage(senderNumber, t);
 }
 
@@ -728,11 +753,11 @@ async function handleCreateTask(senderNumber, member, ai) {
         return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
       }
       if (matches.length > 1) {
-        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal" } });
+        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: cleanTaskTitle(ai.task_title, ai.assignee_name), due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal" } });
         await sendMessage(senderNumber, choiceMenu(ai.assignee_name, matches));
         return;
       }
-      return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
+      return createTaskWithAssignee(senderNumber, member, { title: cleanTaskTitle(ai.task_title, ai.assignee_name || matches[0].name), due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
     }
     return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
   } catch (error) {
