@@ -14,8 +14,11 @@ function getGroq() {
 // ─────────────────────────────────────────
 // MAIN AI FUNCTION — turns casual human text into structured data
 // ─────────────────────────────────────────
-async function understandMessage(message, memberName, orgMembers, today) {
+async function understandMessage(message, memberName, orgMembers, today, recentTasks = []) {
   try {
+    const taskList = (recentTasks || []).length
+      ? recentTasks.map((t) => `  ${t.task_id}: ${t.title}`).join("\n")
+      : "  (none)";
     const prompt = `You are the AI brain of KaryaSetu — a WhatsApp task management bot for small Indian teams.
 
 A team member named "${memberName}" sent this message:
@@ -23,6 +26,11 @@ A team member named "${memberName}" sent this message:
 
 Today's date is: ${today}
 Other members in this organization: ${orgMembers.join(", ")}
+
+Existing OPEN tasks (use these to resolve references — when the user mentions a task by its
+words, e.g. "the banner one", "finding nemo", "mark the invoice done", set task_reference to
+the EXACT matching task id below; if nothing matches, use the words they typed):
+${taskList}
 
 Understand what this person wants — even if they type casually — and extract structured data.
 Return ONLY a valid JSON object. No explanation. No extra text. Just JSON.
@@ -68,6 +76,12 @@ BE TOLERANT OF CASUAL / MESSY INPUT:
   Only pull out the due date and assignee; everything else stays in task_title.
 - KEEP NAMES WHOLE: preserve names exactly as typed, including initials and surnames
   (e.g. "M Achyuth" stays "M Achyuth", not "Achyuth"; "Dr Rao" stays "Dr Rao").
+- TITLE MUST EXCLUDE THE ASSIGNEE: when you set assignee_name, REMOVE that person and the
+  word assigning them ("for"/"to"/"remind") from task_title. The title is ONLY the thing to do.
+  "dance for harita tomorrow" (Harita is a member) -> task_title:"dance", assignee_name:"Harita"
+  "remind rahul to send the invoice" -> task_title:"send the invoice", assignee_name:"Rahul"
+  BUT if the name is NOT in the member list, keep it in the title (it's part of the task):
+  "buy a gift for the client" -> task_title:"buy a gift for the client", assignee_name:null
 - IDENTIFY BY NUMBER: if the user includes a phone number to point at a specific person
   ("assign ks3 to Amit 9876543210", "remove member 9876543210"), put it in phone_number.
 - BARE "ADD TASK": if the message is only "add task" / "create task" / "new task" with NO
@@ -99,17 +113,24 @@ Examples:
 "add task submit report by tomorrow 5pm" -> {"intent":"create_task","task_title":"submit report","due_date":"<tomorrow>","due_time":"17:00","confidence":0.93}
 "rename Achyuth to Achyuth Kumar" -> {"intent":"update_member_name","member_name":"Achyuth","new_name":"Achyuth Kumar","confidence":0.95}
 "change name of 9740070902 to Priya Sharma" -> {"intent":"update_member_name","phone_number":"9740070902","new_name":"Priya Sharma","confidence":0.93}
+"dance for harita tomorrow" -> {"intent":"create_task","task_title":"dance","assignee_name":"Harita","due_date":"<tomorrow>","confidence":0.92}
+"mark the banner one done" -> {"intent":"complete_task","task_reference":"<exact id of the banner task from the list>","confidence":0.9}
+"delete finding nemo" -> {"intent":"delete_task","task_reference":"<exact id of finding nemo from the list>","confidence":0.9}
+"who has what" -> {"intent":"list_all_tasks","confidence":0.6}
 "my tasks" -> {"intent":"list_my_tasks","confidence":0.97}
 
 Rules:
 - If confidence is below 0.55 set clarification_needed to true and ask a short question.
-- Never invent an assignee if no name is given.`;
+- Never invent an assignee if no name is given.
+- ALWAYS resolve a task the user refers to (by words) to its EXACT id from the open-tasks list above.
+- Output MUST be valid JSON only.`;
 
     const response = await getGroq().chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.1,
       max_tokens: 500,
+      response_format: { type: "json_object" },
     });
 
     const rawText = response.choices[0].message.content.trim();
