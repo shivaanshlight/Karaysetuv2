@@ -410,7 +410,6 @@ async function handleMessage(incomingMessage, senderNumber) {
   const lower = message.toLowerCase();
 
   // ── QoL fast commands ──
-  if (/^undo$/i.test(lower)) { await clearConvoState(member.member_id); await handleUndo(senderNumber, member); return; }
   const sn = lower.match(/^snooze\b(.*)$/);
   if (sn) { await clearConvoState(member.member_id); await handleSnooze(senderNumber, member, sn[1].trim()); return; }
 
@@ -514,6 +513,8 @@ async function dispatch(senderNumber, member, ai) {
       return handleAllTasks(senderNumber, member);
     case "list_overdue_tasks": return handleOverdueTasks(senderNumber, member);
     case "stats": return handleStats(senderNumber, member);
+    case "nudge": return handleNudge(senderNumber, member, ai);
+    case "time_report": return handleTimeReport(senderNumber, member, ai);
     case "list_members":
       if (member.role !== "organizer") return sendMessage(senderNumber, "Sorry, only the Organizer can list users.");
       return handleListMembers(senderNumber, member);
@@ -600,7 +601,7 @@ async function resumeChoice(senderNumber, member, convo, chosen) {
   if (convo.purpose === "create_assignee") {
     const ctx = convo.context || {};
     return createTaskWithAssignee(senderNumber, member, {
-      title: ctx.title, due_date: ctx.due_date, due_time: ctx.due_time, recurrence: ctx.recurrence, priority: ctx.priority,
+      title: ctx.title, due_date: ctx.due_date, due_time: ctx.due_time, recurrence: ctx.recurrence, remind_before: ctx.remind_before, remind_at: ctx.remind_at, priority: ctx.priority,
       assigneeId: chosen.member_id, assigneeName: chosen.name, assigneeNumber: chosen.whatsapp_number,
     });
   }
@@ -619,6 +620,9 @@ async function resumeChoice(senderNumber, member, convo, chosen) {
   }
   if (convo.purpose === "remove_member") {
     return promptRemove(senderNumber, member, chosen);
+  }
+  if (convo.purpose === "nudge") {
+    return doNudge(senderNumber, member, chosen);
   }
   if (convo.purpose === "tasks_assigned_to") {
     return listTasksFor(senderNumber, member, chosen);
@@ -647,8 +651,8 @@ async function handleHelp(senderNumber, member) {
   t += `• Add task [description]\n• Update [task] [new description]\n`;
   t += `• Complete [task name or id]\n• Delete [task id]\n`;
   t += `• Assign task [task] to [user]\n• Remove assignment [task]\n• Stats\n`;
-  t += `• Snooze [task] (remind tomorrow) • Undo (revert last)\n`;
-  t += `_Tip: "every monday post report" makes a repeating task 🔁._\n`;
+  t += `• Snooze [task] [1 hour] • Nudge [name]\n`;
+  t += `_Tip: "every monday post report" repeats 🔁 · "remind me 1 hour before" sets a reminder._\n`;
   t += `_Long lists show 20 at a time — reply *more* for next, *back* for previous._\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
@@ -672,11 +676,11 @@ async function createTaskWithAssignee(senderNumber, member, opts) {
          UPDATE organizations SET task_counter = task_counter + 1
          WHERE org_id = $1 RETURNING task_counter
        )
-       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, due_time, priority, recurrence)
-       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4, $5, $6, $7, $8
+       INSERT INTO tasks (task_id, org_id, title, owner_id, creator_id, assignee_id, due_date, due_time, priority, recurrence, remind_before_minutes, remind_at)
+       SELECT 'KS-' || lpad(bumped.task_counter::text, 3, '0'), $1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10
        FROM bumped
        RETURNING task_id`,
-      [member.org_id, opts.title, member.member_id, opts.assigneeId, opts.due_date || null, opts.due_time || null, opts.priority || "normal", opts.recurrence || null],
+      [member.org_id, opts.title, member.member_id, opts.assigneeId, opts.due_date || null, opts.due_time || null, opts.priority || "normal", opts.recurrence || null, opts.remind_before || null, opts.remind_at || null],
     );
     const taskId = r.rows[0].task_id;
     const dueTxt = formatDue(opts.due_date, opts.due_time);
@@ -711,16 +715,16 @@ async function handleCreateTask(senderNumber, member, ai) {
       const matches = await resolveMembers(ai.assignee_name, ai.phone_number, member.org_id);
       if (matches.length === 0) {
         await sendMessage(senderNumber, `${ai.assignee_name || ai.phone_number} is not a user of ${member.org_name}. Assigning to you instead.`);
-        return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
+        return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
       }
       if (matches.length > 1) {
-        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal" } });
+        await setConvoState(member.member_id, { awaiting: "choice", purpose: "create_assignee", options: optionList(matches), context: { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal" } });
         await sendMessage(senderNumber, choiceMenu(ai.assignee_name, matches));
         return;
       }
-      return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
+      return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: matches[0].member_id, assigneeName: matches[0].name, assigneeNumber: matches[0].whatsapp_number });
     }
-    return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
+    return createTaskWithAssignee(senderNumber, member, { title: ai.task_title, due_date: ai.due_date, due_time: ai.due_time, recurrence: ai.recurrence, remind_before: ai.remind_before_minutes, remind_at: ai.remind_at, priority: ai.priority || "normal", assigneeId: member.member_id, assigneeName: member.name, assigneeNumber: member.whatsapp_number });
   } catch (error) {
     console.log("Error:", error.message);
     await sendMessage(senderNumber, "Something went wrong. Please try again.");
@@ -757,9 +761,8 @@ async function executeCompleteTask(senderNumber, member, action) {
     const data = action.action_data;
     await pool.query(`UPDATE tasks SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [data.task_id, member.org_id]);
     await pool.query(`UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`, [action.action_id]);
-    await rememberUndo(member.member_id, data.task_id, "completed");
     const next = await spawnRecurrence(member.org_id, data.task_id);
-    await sendMessage(senderNumber, `Great work! ✅ ${data.task_id} marked complete.${next ? `\n🔁 Next one created: ${next}.` : ""}\n_Reply *undo* within 10 min to revert._`);
+    await sendMessage(senderNumber, `Great work! ✅ ${data.task_id} marked complete.${next ? `\n🔁 Next one created: ${next}.` : ""}`);
     if (data.owner_id !== member.member_id && data.owner_number) {
       await sendMessage(data.owner_number, `✅ ${data.task_id} — ${data.task_title} has been completed by ${member.name}.`);
     }
@@ -767,7 +770,7 @@ async function executeCompleteTask(senderNumber, member, action) {
 }
 
 // ─────────────────────────────────────────
-// QoL: recurrence + undo helpers
+// QoL: recurrence + snooze helpers
 // ─────────────────────────────────────────
 // When a recurring task is completed, create the next instance with the due
 // date advanced. Returns the new task id (or null).
@@ -789,33 +792,36 @@ async function spawnRecurrence(orgId, taskId) {
     return cr.rows[0].task_id;
   } catch (e) { console.log("spawnRecurrence error:", e.message); return null; }
 }
-async function rememberUndo(memberId, taskId, prevAction) {
-  try {
-    await pool.query(`UPDATE members SET last_undo = $1 WHERE member_id = $2`,
-      [JSON.stringify({ task_id: taskId, action: prevAction, at: Date.now() }), memberId]);
-  } catch (e) { /* ignore */ }
+// "snooze [task] [duration]" — push a reminder by a duration (default 1 hour).
+// e.g. "snooze KS-004 2 hours", "snooze 30 min", "snooze KS-004 1 day".
+function parseSnoozeArgs(text) {
+  const s = String(text || "").trim();
+  const dm = s.match(/(\d+)\s*(day|days|hour|hours|hr|hrs|minute|minutes|min|mins)/i);
+  let interval = "1 hour", label = "1 hour";
+  if (dm) {
+    const n = parseInt(dm[1], 10);
+    const u = dm[2].toLowerCase();
+    if (u.startsWith("day")) { interval = `${n} day`; label = `${n} day${n > 1 ? "s" : ""}`; }
+    else if (u.startsWith("h")) { interval = `${n} hour`; label = `${n} hour${n > 1 ? "s" : ""}`; }
+    else { interval = `${n} minute`; label = `${n} min`; }
+  }
+  // The task reference is whatever remains after removing the duration words.
+  const ref = s.replace(/(\d+)\s*(day|days|hour|hours|hr|hrs|minute|minutes|min|mins)/i, "").trim();
+  return { interval, label, ref };
 }
-async function handleUndo(senderNumber, member) {
+async function handleSnooze(senderNumber, member, text) {
   try {
-    const r = await pool.query(`SELECT last_undo FROM members WHERE member_id = $1`, [member.member_id]);
-    const u = r.rows[0] && r.rows[0].last_undo;
-    if (!u || !u.task_id) return sendMessage(senderNumber, "Nothing to undo.");
-    if (Date.now() - (u.at || 0) > 10 * 60 * 1000) return sendMessage(senderNumber, "That action is too old to undo (10-min limit).");
-    await pool.query(`UPDATE tasks SET status = 'open', completed_at = NULL, updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [u.task_id, member.org_id]);
-    await pool.query(`UPDATE members SET last_undo = NULL WHERE member_id = $1`, [member.member_id]);
-    await sendMessage(senderNumber, `Undone ↩️ ${u.task_id} is back to open.`);
-  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
-}
-// "snooze [task]" — push a task's reminder to tomorrow.
-async function handleSnooze(senderNumber, member, ref) {
-  try {
+    const { interval, label, ref } = parseSnoozeArgs(text);
     const r = ref || member.last_task_id;
-    if (!r) return sendMessage(senderNumber, "Which task? Example: snooze KS-004");
+    if (!r) return sendMessage(senderNumber, "Which task? Example: snooze KS-004 1 hour");
     const task = await findTaskByReference(member.org_id, r);
     if (!task) return sendMessage(senderNumber, `I couldn't find that task.`);
-    await pool.query(`UPDATE tasks SET snooze_until = (CURRENT_DATE + INTERVAL '1 day')::date, reminded_on = NULL WHERE task_id = $1 AND org_id = $2`, [task.task_id, member.org_id]);
+    await pool.query(
+      `UPDATE tasks SET snooze_until = NOW() + ($3 || '')::interval, remind_sent = false WHERE task_id = $1 AND org_id = $2`,
+      [task.task_id, member.org_id, interval],
+    );
     await setLastTask(member.member_id, task.task_id);
-    await sendMessage(senderNumber, `⏰ Okay — I'll remind you about ${task.task_id} tomorrow.`);
+    await sendMessage(senderNumber, `⏰ Okay — I'll remind you about ${task.task_id} in ${label}.`);
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
 
@@ -1028,8 +1034,7 @@ async function executeDeleteTask(senderNumber, member, action) {
     const data = action.action_data;
     await pool.query(`UPDATE tasks SET status = 'deleted', updated_at = NOW() WHERE task_id = $1 AND org_id = $2`, [data.task_id, member.org_id]);
     await pool.query(`UPDATE pending_actions SET status = 'confirmed' WHERE action_id = $1`, [action.action_id]);
-    await rememberUndo(member.member_id, data.task_id, "deleted");
-    await sendMessage(senderNumber, `${data.task_id} has been deleted.\n_Reply *undo* within 10 min to restore it._`);
+    await sendMessage(senderNumber, `${data.task_id} has been deleted.`);
     if (data.assignee_id && data.assignee_id !== member.member_id && data.assignee_number) {
       await sendMessage(data.assignee_number, `${data.task_id} — ${data.task_title} has been deleted by ${member.name}.`);
     }
@@ -1293,6 +1298,63 @@ async function handleStats(senderNumber, member) {
       msg += `\n*Workload*\n`;
       per.rows.forEach((x) => { msg += `• ${x.name} — ${x.open} open\n`; });
     }
+    await sendMessage(senderNumber, msg);
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+
+// ─────────────────────────────────────────
+// NUDGE — remind a teammate about their open tasks
+// ─────────────────────────────────────────
+async function handleNudge(senderNumber, member, ai) {
+  try {
+    const name = ai.member_name || ai.assignee_name;
+    if (!name && !ai.phone_number) { await sendMessage(senderNumber, "Who do you want to nudge? Example: Nudge Santosh"); return; }
+    const matches = await resolveMembers(name, ai.phone_number, member.org_id);
+    if (matches.length === 0) { await sendMessage(senderNumber, `${name || ai.phone_number} is not a user of ${member.org_name}.`); return; }
+    if (matches.length > 1) {
+      await setConvoState(member.member_id, { awaiting: "choice", purpose: "nudge", options: optionList(matches) });
+      await sendMessage(senderNumber, choiceMenu(name, matches));
+      return;
+    }
+    return doNudge(senderNumber, member, matches[0]);
+  } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
+}
+async function doNudge(senderNumber, member, target) {
+  const tasks = await pool.query(
+    `SELECT task_id, title, due_date, due_time FROM tasks
+     WHERE org_id = $1 AND assignee_id = $2 AND status NOT IN ('completed','deleted')
+     ORDER BY due_date ASC NULLS LAST LIMIT 10`, [member.org_id, target.member_id]);
+  if (tasks.rows.length === 0) { await sendMessage(senderNumber, `${target.name} has no open tasks 🎉`); return; }
+  let body = `👋 Hi ${target.name}, a reminder from ${member.name} about your open tasks:\n\n`;
+  tasks.rows.forEach((t) => { body += `• ${t.task_id} — ${t.title}${t.due_date ? ` (📅 ${formatDue(t.due_date, t.due_time)})` : ""}\n`; });
+  body += `\nReply *my tasks* to manage them.`;
+  if (target.whatsapp_number) await sendMessage(target.whatsapp_number, body);
+  await sendMessage(senderNumber, `Nudged ${target.name} about their ${tasks.rows.length} open task${tasks.rows.length > 1 ? "s" : ""} ✅`);
+}
+
+// ─────────────────────────────────────────
+// TIME REPORT — tasks created / closed in the last N days
+// ─────────────────────────────────────────
+async function handleTimeReport(senderNumber, member, ai) {
+  try {
+    const type = ai.report_type === "closed" ? "closed" : "created";
+    const days = Math.min(365, Math.max(1, parseInt(ai.report_days, 10) || 7));
+    const isOrg = member.role === "organizer";
+    const scope = isOrg ? "t.org_id = $1" : "(t.assignee_id = $1 OR t.owner_id = $1)";
+    const id = isOrg ? member.org_id : member.member_id;
+    const col = type === "closed" ? "completed_at" : "created_at";
+    const statusFilter = type === "closed" ? "t.status = 'completed'" : "t.status != 'deleted'";
+    const r = await pool.query(
+      `SELECT t.task_id, t.title, t.${col} AS ts, a.name AS assignee_name
+       FROM tasks t LEFT JOIN members a ON t.assignee_id = a.member_id
+       WHERE ${scope} AND ${statusFilter} AND t.${col} > NOW() - ($2 || ' days')::interval
+       ORDER BY t.${col} DESC LIMIT 30`, [id, String(days)]);
+    if (r.rows.length === 0) { await sendMessage(senderNumber, `No tasks ${type} in the last ${days} days.`); return; }
+    let msg = `*🗂 Tasks ${type} (last ${days} days) — ${r.rows.length}*\n\n`;
+    r.rows.forEach((t) => {
+      const d = t.ts ? new Date(t.ts).toDateString() : "";
+      msg += `${t.task_id} | ${t.title}${t.assignee_name ? ` | ${t.assignee_name}` : ""} | ${d}\n`;
+    });
     await sendMessage(senderNumber, msg);
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
