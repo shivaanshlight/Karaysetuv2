@@ -29,13 +29,17 @@ Return ONLY a valid JSON object. No explanation. No extra text. Just JSON.
 
 JSON structure:
 {
-  "intent": "one of: create_task, list_my_tasks, list_assigned_tasks, list_all_tasks, list_overdue_tasks, complete_task, delete_task, update_task, reassign_task, unassign_task, transfer_ownership, add_member, remove_member, update_member_name, list_members, help, tasks_assigned_to, unknown",
+  "intent": "one of: create_task, list_my_tasks, list_assigned_tasks, list_all_tasks, list_overdue_tasks, complete_task, delete_task, update_task, reassign_task, unassign_task, transfer_ownership, add_member, remove_member, update_member_name, list_members, help, tasks_assigned_to, nudge, time_report, unknown",
   "confidence": 0.0 to 1.0,
   "task_title": "the FULL task text (for create) or the NEW text (for update) — keep ALL of it, even multiple sentences; else null",
   "assignee_name": "the name of who to assign to, exactly as written (keep initials and full names like 'M Achyuth'), else null",
   "due_date": "YYYY-MM-DD or null",
   "due_time": "24-hour time HH:MM if the user gave a time (e.g. '5pm'->'17:00', '9:30 am'->'09:30'), else null",
   "recurrence": "daily|weekly|monthly if the task repeats (e.g. 'every monday'->weekly, 'daily'->daily, 'every month'->monthly), else null",
+  "remind_before_minutes": "integer minutes before the due time to remind (e.g. '1 hour before'->60, '30 min before'->30, '1 day before'->1440), else null",
+  "remind_at": "absolute reminder time 'YYYY-MM-DD HH:MM' if user says 'remind me at <time> <day>' (resolve the day against today), else null",
+  "report_type": "for time_report: 'created' or 'closed', else null",
+  "report_days": "for time_report: number of days back (e.g. 'last 20 days'->20), else null",
   "priority": "high or normal or low or null",
   "task_reference": "a task id or partial task name the user is referring to, else null",
   "member_name": "name of member for add/remove/rename (the CURRENT name), exactly as written, else null",
@@ -86,6 +90,11 @@ Examples:
 "assign ks3 to M Achyuth 9876543210" -> {"intent":"reassign_task","task_reference":"KS-003","assignee_name":"M Achyuth","phone_number":"9876543210","confidence":0.92}
 "add task" -> {"intent":"create_task","task_title":null,"confidence":0.9}
 "every monday post the weekly report" -> {"intent":"create_task","task_title":"post the weekly report","recurrence":"weekly","due_date":"<next monday>","confidence":0.9}
+"add task call vendor friday, remind me 1 hour before" -> {"intent":"create_task","task_title":"call vendor","due_date":"<friday>","remind_before_minutes":60,"confidence":0.9}
+"remind me to submit report at 5pm thursday" -> {"intent":"create_task","task_title":"submit report","remind_at":"<thursday> 17:00","confidence":0.9}
+"nudge santosh for all open tasks" -> {"intent":"nudge","member_name":"Santosh","confidence":0.93}
+"show all tasks created during last 20 days" -> {"intent":"time_report","report_type":"created","report_days":20,"confidence":0.92}
+"show all tasks closed during last 20 days" -> {"intent":"time_report","report_type":"closed","report_days":20,"confidence":0.92}
 "add task submit report by tomorrow 5pm" -> {"intent":"create_task","task_title":"submit report","due_date":"<tomorrow>","due_time":"17:00","confidence":0.93}
 "rename Achyuth to Achyuth Kumar" -> {"intent":"update_member_name","member_name":"Achyuth","new_name":"Achyuth Kumar","confidence":0.95}
 "change name of 9740070902 to Priya Sharma" -> {"intent":"update_member_name","phone_number":"9740070902","new_name":"Priya Sharma","confidence":0.93}
