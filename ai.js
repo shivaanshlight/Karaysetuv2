@@ -39,7 +39,7 @@ JSON structure:
   "remind_before_minutes": "integer minutes before the due time to remind (e.g. '1 hour before'->60, '30 min before'->30, '1 day before'->1440), else null",
   "remind_at": "absolute reminder time 'YYYY-MM-DD HH:MM' if user says 'remind me at <time> <day>' (resolve the day against today), else null",
   "report_type": "for time_report: 'created' or 'closed', else null",
-  "report_days": "for time_report: number of days back (e.g. 'last 20 days'->20), else null",
+  "report_window": "for time_report: how far back as a number + unit — minutes/hours/days/weeks/months (e.g. 'last 20 days'->'20 days', 'last 1 hour'->'1 hour', 'past 2 weeks'->'2 weeks'), else null",
   "priority": "high or normal or low or null",
   "task_reference": "a task id or partial task name the user is referring to, else null",
   "member_name": "name of member for add/remove/rename (the CURRENT name), exactly as written, else null",
@@ -93,8 +93,9 @@ Examples:
 "add task call vendor friday, remind me 1 hour before" -> {"intent":"create_task","task_title":"call vendor","due_date":"<friday>","remind_before_minutes":60,"confidence":0.9}
 "remind me to submit report at 5pm thursday" -> {"intent":"create_task","task_title":"submit report","remind_at":"<thursday> 17:00","confidence":0.9}
 "nudge santosh for all open tasks" -> {"intent":"nudge","member_name":"Santosh","confidence":0.93}
-"show all tasks created during last 20 days" -> {"intent":"time_report","report_type":"created","report_days":20,"confidence":0.92}
-"show all tasks closed during last 20 days" -> {"intent":"time_report","report_type":"closed","report_days":20,"confidence":0.92}
+"show all tasks created during last 20 days" -> {"intent":"time_report","report_type":"created","report_window":"20 days","confidence":0.92}
+"tasks closed in the last 1 hour" -> {"intent":"time_report","report_type":"closed","report_window":"1 hour","confidence":0.92}
+"tasks created in the past 2 weeks" -> {"intent":"time_report","report_type":"created","report_window":"2 weeks","confidence":0.9}
 "add task submit report by tomorrow 5pm" -> {"intent":"create_task","task_title":"submit report","due_date":"<tomorrow>","due_time":"17:00","confidence":0.93}
 "rename Achyuth to Achyuth Kumar" -> {"intent":"update_member_name","member_name":"Achyuth","new_name":"Achyuth Kumar","confidence":0.95}
 "change name of 9740070902 to Priya Sharma" -> {"intent":"update_member_name","phone_number":"9740070902","new_name":"Priya Sharma","confidence":0.93}
