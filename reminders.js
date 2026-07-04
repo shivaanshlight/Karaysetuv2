@@ -61,7 +61,7 @@ async function runReminderCheck() {
           if (tasks.rows.length) {
             const count = tasks.rows.length;
             if (DIGEST_SID) {
-              try { await client.messages.create({ from: BOT_NUMBER, to: m.whatsapp_number, contentSid: DIGEST_SID, contentVariables: JSON.stringify({ "1": m.name, "2": String(count) }) }); }
+              try { await client.messages.create({ from: BOT_NUMBER, to: m.whatsapp_number, contentSid: DIGEST_SID, contentVariables: JSON.stringify({ user_name: m.name, task_count: String(count) }) }); }
               catch (e) { console.log("Digest template failed, using text:", e.message); }
             } else {
               let body = `🌅 Good morning, ${m.name}! You have ${count} task${count > 1 ? "s" : ""} to look at today:\n\n`;
