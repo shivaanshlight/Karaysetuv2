@@ -24,7 +24,7 @@ async function sendMemberWelcome(to, name, orgName) {
         from: BOT_NUMBER,
         to,
         contentSid: sid,
-        contentVariables: JSON.stringify({ "1": name, "2": orgName }),
+        contentVariables: JSON.stringify({ user_name: name, org_name: orgName }),
       });
     } else {
       await twClient.messages.create({
