@@ -21,7 +21,7 @@ async function send(to, body) {
 }
 async function sendReminderTemplate(to, taskId, title, dueText, fallback) {
   if (REMINDER_SID) {
-    try { await client.messages.create({ from: BOT_NUMBER, to, contentSid: REMINDER_SID, contentVariables: JSON.stringify({ "1": taskId, "2": title, "3": dueText }) }); return; }
+    try { await client.messages.create({ from: BOT_NUMBER, to, contentSid: REMINDER_SID, contentVariables: JSON.stringify({ task_id: taskId, task_synopsis: title, due_date_time: dueText }) }); return; }
     catch (e) { console.log("Reminder template failed, using text:", e.message); }
   }
   await send(to, fallback);
