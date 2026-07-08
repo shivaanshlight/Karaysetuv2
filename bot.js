@@ -116,6 +116,29 @@ async function sendTaskAssigned(to, assigneeName, ownerName, taskId, title, dueT
   await sendMessage(to, `📋 New task assigned by ${ownerName}:\n${taskId} — ${title}\n📅 Due: ${dueText}`);
 }
 
+// Welcome a newly-added member. Uses the approved member_welcome template
+// (MEMBER_WELCOME_CONTENT_SID) so it reaches a BRAND-NEW number that has never
+// messaged the bot (plain text can't — WhatsApp blocks freeform outside the
+// 24h window). The template uses NAMED variables, so keys must match exactly.
+async function sendMemberWelcome(to, userName, orgName) {
+  const sid = process.env.MEMBER_WELCOME_CONTENT_SID;
+  if (sid) {
+    try {
+      await client.messages.create({
+        from: BOT_NUMBER,
+        to,
+        contentSid: sid,
+        contentVariables: JSON.stringify({ user_name: userName, org_name: orgName }),
+      });
+      console.log("✅ member_welcome template sent to:", to);
+      return;
+    } catch (error) {
+      console.log("member_welcome template failed, using text:", error.message);
+    }
+  }
+  await sendMessage(to, `Hi ${userName}! You've been added to ${orgName} on KaryaSetu.\n\nSend *Help* to see what you can do.`);
+}
+
 // ─────────────────────────────────────────
 // CONVERSATION STATE — short-term memory of "what am I waiting for"
 // ─────────────────────────────────────────
@@ -1099,7 +1122,9 @@ async function handleAddMember(senderNumber, member, ai) {
       await pool.query(`INSERT INTO members (org_id, name, whatsapp_number, role) VALUES ($1, $2, $3, 'member')`, [member.org_id, ai.member_name, formattedNumber]);
     }
     await sendMessage(senderNumber, `Added ✅ ${ai.member_name} is now a user of ${member.org_name}.`);
-    await sendMessage(formattedNumber, `Hi ${ai.member_name}! You've been added to ${member.org_name} on KaryaSetu.\n\nSend *Help* to see what you can do.`);
+    // Welcome the new member via the approved template so it reaches a brand-new
+    // number that has never messaged the bot (plain text would be blocked).
+    await sendMemberWelcome(formattedNumber, ai.member_name, member.org_name);
   } catch (error) { console.log("Error:", error.message); await sendMessage(senderNumber, "Something went wrong. Please try again."); }
 }
 
