@@ -306,6 +306,7 @@ const FAST_PATHS = {
   list_all_tasks: new Set(["all tasks", "all open tasks", "all task", "all open task"]),
   list_members: new Set(["list members", "list users", "list member", "list user", "all members", "all users"]),
   stats: new Set(["stats", "report", "reports", "statistics", "my stats", "my report"]),
+  panel: new Set(["panel", "organizer panel", "web panel", "panel link", "open panel", "dashboard link"]),
   help: new Set(["help", "help me", "menu", "commands", "command list", "what can you do", "what can i do"]),
 };
 function fastPathIntent(message) {
@@ -559,6 +560,9 @@ async function dispatch(senderNumber, member, ai) {
     case "list_members":
       if (member.role !== "organizer") return sendMessage(senderNumber, "Sorry, only the Organizer can list users.");
       return handleListMembers(senderNumber, member);
+    case "panel":
+      if (member.role !== "organizer") return sendMessage(senderNumber, "Sorry, only the Organizer can use the web panel.");
+      return handlePanel(senderNumber, member);
     case "create_task": return handleCreateTask(senderNumber, member, ai);
     case "complete_task": return handleCompleteTask(senderNumber, member, ai);
     case "delete_task": return handleDeleteTask(senderNumber, member, ai);
@@ -716,9 +720,25 @@ async function handleHelp(senderNumber, member) {
   t += `_Long lists show 20 at a time — reply *more* for next, *back* for previous._\n\n`;
   t += `*Configuration:*\n• Enable reminders\n• Disable reminders\n• Remind before [n days / weeks]\n`;
   if (member.role === "organizer") {
-    t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n`;
+    t += `\n*Organizer only:*\n• All tasks\n• Tasks assigned to [name]\n• List users\n• Add member [name] [number]\n• Remove member [name]\n• Rename [name] to [new name]\n• Panel — link to the web dashboard\n`;
   }
   await sendMessage(senderNumber, t);
+}
+
+// ─────────────────────────────────────────
+// PANEL — organizer-only: just hand back the web-panel link (no AI).
+// Uses FRONTEND_ORIGIN, which is already the panel's own domain.
+// ─────────────────────────────────────────
+async function handlePanel(senderNumber, member) {
+  const url = process.env.FRONTEND_ORIGIN || process.env.PANEL_URL;
+  if (!url) {
+    await sendMessage(senderNumber, "The web panel link isn't configured yet. Ask your admin to set FRONTEND_ORIGIN.");
+    return;
+  }
+  await sendMessage(
+    senderNumber,
+    `🖥️ *Organizer Web Panel*\n${url}\n\nLog in with your registered WhatsApp number — I'll send you a one-time code to sign in.`,
+  );
 }
 
 // ─────────────────────────────────────────
