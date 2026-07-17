@@ -438,14 +438,9 @@ async function handleMessage(incomingMessage, senderNumber) {
   if (sn) { await clearConvoState(member.member_id); await handleSnooze(senderNumber, member, sn[1].trim()); return; }
   const ng = lower.match(/^nudge\b\s*(.*)$/);
   if (ng && ng[1].trim()) { await clearConvoState(member.member_id); await handleNudge(senderNumber, member, { member_name: ng[1].trim() }); return; }
-  // Time report: "...tasks created/closed in last N minutes/hours/days/weeks/months"
-  const tr = lower.match(/\b(created|closed|completed|done)\b[\s\S]*?(\d+)\s*(minute|min|hour|hr|day|week|month)s?\b/);
-  if (tr && /\btask/.test(lower) && /\b(last|past)\b/.test(lower)) {
-    await clearConvoState(member.member_id);
-    const type = /(closed|completed|done)/.test(tr[1]) ? "closed" : "created";
-    await handleTimeReport(senderNumber, member, { report_type: type, report_window: `${tr[2]} ${tr[3]}` });
-    return;
-  }
+  // (Time reports — "list tasks for the past N days", "tasks closed last week", etc.
+  // — are classified by the AI as intent "time_report", which tolerates typos and
+  // varied phrasing. No hardcoded regex here.)
 
   // ── Explicit config commands (clear any pending question first) ──
   const rb = lower.match(/remind\s+before\s+(\d+)\s*(week|weeks|day|days|hour|hours|minute|minutes|min|mins)/);
