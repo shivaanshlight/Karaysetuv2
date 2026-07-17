@@ -59,7 +59,7 @@ JSON structure:
 
 BE TOLERANT OF CASUAL / MESSY INPUT:
 - Fix typos and shorthand: "tmrw/tom/tmro"=tomorrow, "eod"=today, "asap"=high priority,
-  "fri"=Friday, "mon"=Monday, "nxt week"=next week, "plz/pls" ignore, "u"=you.
+  "fri"=Friday, "mon"=Monday, "nxt week"=next week, "plz/pls" ignore, "u"=you, "taks/tsk"=task.
 - Lowercase, no punctuation, run-on sentences are normal — still extract correctly.
 - Hinglish: "kal"=tomorrow, "aaj"=today, "parso"=day after tomorrow, "khatam/done karo"=complete,
   "bana do/banao/add karo"=create, "hata do"=delete/remove, "de do/assign karo"=assign.
@@ -93,6 +93,18 @@ BE TOLERANT OF CASUAL / MESSY INPUT:
 - RENAME: "rename/change name of [current] to [new]" -> intent update_member_name, with
   member_name = current name (or phone_number if given) and new_name = the new name.
 
+TIME WINDOW -> ALWAYS time_report (this is important):
+- If the user asks to LIST / SHOW / SEE tasks WITHIN A TIME WINDOW — any of "last N ...",
+  "past N ...", "in the last week", "for the past 2 days", "over the last month",
+  "from the last 30 days", "recent N days" — the intent is "time_report", NOT
+  list_all_tasks or list_my_tasks. This holds EVEN IF they say "all tasks" — a time
+  window ALWAYS wins and makes it a time_report.
+- Set report_window to "<number> <unit>" (units: minute/hour/day/week/month), e.g. "2 days",
+  "30 days", "1 week", "1 hour".
+- Set report_type to "closed" when they mention closed / completed / done / finished; otherwise
+  default to "created".
+- Only use list_all_tasks / list_my_tasks / list_overdue_tasks when there is NO time window.
+
 Examples:
 "pls add task call the client tmrw" -> {"intent":"create_task","task_title":"call the client","due_date":"<tomorrow>","priority":null,"confidence":0.95}
 "remind rahul to send invoice by fri, urgent" -> {"intent":"create_task","task_title":"send invoice","assignee_name":"Rahul","due_date":"<this friday>","priority":"high","confidence":0.93}
@@ -110,6 +122,12 @@ Examples:
 "show all tasks created during last 20 days" -> {"intent":"time_report","report_type":"created","report_window":"20 days","confidence":0.92}
 "tasks closed in the last 1 hour" -> {"intent":"time_report","report_type":"closed","report_window":"1 hour","confidence":0.92}
 "tasks created in the past 2 weeks" -> {"intent":"time_report","report_type":"created","report_window":"2 weeks","confidence":0.9}
+"list tasks for the past 2 days" -> {"intent":"time_report","report_type":"created","report_window":"2 days","confidence":0.9}
+"list taks for the past 2 days" -> {"intent":"time_report","report_type":"created","report_window":"2 days","confidence":0.9}
+"list all tasks from last 30 days" -> {"intent":"time_report","report_type":"created","report_window":"30 days","confidence":0.92}
+"show me the tasks from the last week" -> {"intent":"time_report","report_type":"created","report_window":"1 week","confidence":0.9}
+"tasks done in the last 3 days" -> {"intent":"time_report","report_type":"closed","report_window":"3 days","confidence":0.9}
+"what got completed this past week" -> {"intent":"time_report","report_type":"closed","report_window":"1 week","confidence":0.88}
 "add task submit report by tomorrow 5pm" -> {"intent":"create_task","task_title":"submit report","due_date":"<tomorrow>","due_time":"17:00","confidence":0.93}
 "rename Achyuth to Achyuth Kumar" -> {"intent":"update_member_name","member_name":"Achyuth","new_name":"Achyuth Kumar","confidence":0.95}
 "change name of 9740070902 to Priya Sharma" -> {"intent":"update_member_name","phone_number":"9740070902","new_name":"Priya Sharma","confidence":0.93}
@@ -117,12 +135,14 @@ Examples:
 "mark the banner one done" -> {"intent":"complete_task","task_reference":"<exact id of the banner task from the list>","confidence":0.9}
 "delete finding nemo" -> {"intent":"delete_task","task_reference":"<exact id of finding nemo from the list>","confidence":0.9}
 "who has what" -> {"intent":"list_all_tasks","confidence":0.6}
+"all tasks" -> {"intent":"list_all_tasks","confidence":0.9}
 "my tasks" -> {"intent":"list_my_tasks","confidence":0.97}
 
 Rules:
 - If confidence is below 0.55 set clarification_needed to true and ask a short question.
 - Never invent an assignee if no name is given.
 - ALWAYS resolve a task the user refers to (by words) to its EXACT id from the open-tasks list above.
+- A time window ("last/past N days/weeks/…") ALWAYS means intent time_report, never a plain list.
 - Output MUST be valid JSON only.`;
 
     const response = await getGroq().chat.completions.create({
