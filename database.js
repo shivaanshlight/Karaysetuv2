@@ -22,13 +22,23 @@ function buildSslConfig() {
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: buildSslConfig(),
-  // Keep connections warm so we don't pay a fresh TLS handshake (slow,
-  // especially across regions) on the first query after an idle period.
   max: 10,
-  idleTimeoutMillis: 0, // never close idle clients — keep the warm socket open
+  // Recycle idle clients after 60s. Supabase's pooler closes idle connections on
+  // its side; if we held them open forever (idleTimeoutMillis: 0) those dead
+  // sockets pile up and later fire errors. 60s > the 30s keep-warm ping below, so
+  // the primary connection is always refreshed before it can time out.
+  idleTimeoutMillis: 60000,
   connectionTimeoutMillis: 10000,
   keepAlive: true, // TCP keep-alive so the socket isn't dropped while idle
   keepAliveInitialDelayMillis: 5000,
+});
+
+// CRITICAL: handle errors on IDLE pooled clients. Supabase's pooler drops idle
+// connections; without this handler node-postgres prints the entire socket object
+// (a huge log dump) and can crash the whole process. Here we just log one clean
+// line — the pool transparently makes a fresh connection on the next query.
+pool.on("error", (err) => {
+  console.log("⚠️  Idle DB client dropped (pool will reconnect):", err.message);
 });
 
 pool.connect((err, client, release) => {
